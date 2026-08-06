@@ -37,6 +37,8 @@ type Product struct {
 	ManualFormSchema     jsonmap.JSON      `json:"manual_form_schema"`
 	ManualStockAvailable int               `json:"manual_stock_available"`
 	AutoStockAvailable   int64             `json:"auto_stock_available"`
+	ManualStockSold      int                `json:"manual_stock_sold"`
+	AutoStockSold        int64              `json:"auto_stock_sold"`
 	StockStatus          string            `json:"stock_status"`
 	IsSoldOut            bool              `json:"is_sold_out"`
 

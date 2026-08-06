@@ -97,6 +97,8 @@ func (v *publicProductView) toProductResp() productpresenter.Product {
 		ManualFormSchema:     v.Product.ManualFormSchemaJSON,
 		ManualStockAvailable: domaincatalog.MaskStockInt(mode, v.ManualStockAvailable),
 		AutoStockAvailable:   domaincatalog.MaskStockInt64(mode, v.AutoStockAvailable),
+		ManualStockSold:      domaincatalog.MaskSoldCount(mode, v.Product.ManualStockSold),
+		AutoStockSold:        int64(domaincatalog.MaskSoldCount(mode, int(v.AutoStockSold))),
 		StockStatus:          v.StockStatus,
 		IsSoldOut:            v.IsSoldOut,
 		PaymentChannelIDs:    productdomain.DecodePaymentChannelIDs(v.Product.PaymentChannelIDs),
