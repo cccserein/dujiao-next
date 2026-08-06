@@ -158,6 +158,7 @@
     "searchPlaceholder": "搜索商品名称",
     "promotionTag": "活动价",
     "wholesaleTag": "批发价",
+    "soldCount": "已售: {count}",
     "memberPriceTag": "会员价",
     "saveAmount": "立省",
     "stockStatus": {

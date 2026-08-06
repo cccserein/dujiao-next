@@ -91,6 +91,7 @@
                   <Badge :variant="getStockBadgeVariant(product.stock_status)">
                     {{ getStockStatusLabel(product) }}
                   </Badge>
+                  <span class="text-sm font-medium text-muted-foreground ml-2">{{ t('products.soldCount', { count: (product.manual_stock_sold || 0) + (product.auto_stock_sold || 0) }) }}</span>
                 </div>
 
                 <div class="mb-8 border-b pb-8" ref="priceSection">

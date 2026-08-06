@@ -64,6 +64,7 @@
         <Badge class="hidden sm:inline-flex" size="xs" :variant="getStockBadgeVariant(product.stock_status)">
           {{ getStockStatusLabel(product) }}
         </Badge>
+        <span class="text-[10px] text-muted-foreground ml-1">{{ t('products.soldCount', { count: (product.manual_stock_sold || 0) + (product.auto_stock_sold || 0) }) }}</span>
       </div>
     </div>
 

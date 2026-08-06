@@ -158,6 +158,7 @@
     "searchPlaceholder": "搜尋商品名稱",
     "promotionTag": "活動價",
     "wholesaleTag": "批發價",
+    "soldCount": "已售: {count}",
     "memberPriceTag": "會員價",
     "saveAmount": "現省",
     "stockStatus": {

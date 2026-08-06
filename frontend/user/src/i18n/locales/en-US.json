@@ -158,6 +158,7 @@
     "searchPlaceholder": "Search products",
     "promotionTag": "Promo",
     "wholesaleTag": "Wholesale",
+    "soldCount": "Sold: {count}",
     "memberPriceTag": "VIP",
     "saveAmount": "Save",
     "stockStatus": {
