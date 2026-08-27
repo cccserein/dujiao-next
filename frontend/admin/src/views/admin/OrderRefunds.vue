@@ -204,7 +204,7 @@ watch(
     </div>
 
     <div class="rounded-xl border border-border bg-card overflow-x-auto">
-      <Table class="min-w-[880px]">
+      <Table class="min-w-[1040px]">
         <TableHeader class="border-b border-border bg-muted/40 text-xs uppercase text-muted-foreground">
           <TableRow>
             <TableHead class="px-6 py-3">{{ t('admin.orderRefunds.table.id') }}</TableHead>
@@ -213,18 +213,19 @@ watch(
             <TableHead class="px-6 py-3 min-w-[180px]">{{ t('admin.orderRefunds.table.user') }}</TableHead>
             <TableHead class="px-6 py-3">{{ t('admin.orderRefunds.table.refundType') }}</TableHead>
             <TableHead class="px-6 py-3">{{ t('admin.orderRefunds.table.amount') }}</TableHead>
+            <TableHead class="px-6 py-3">{{ t('admin.orderRefunds.table.paymentFeeRefund') }}</TableHead>
             <TableHead class="px-6 py-3">{{ t('admin.orderRefunds.table.createdAt') }}</TableHead>
             <TableHead class="px-6 py-3 min-w-[90px] text-right">{{ t('admin.orderRefunds.table.action') }}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody class="divide-y divide-border">
           <TableRow v-if="loading">
-            <TableCell :colspan="8" class="p-0">
-              <TableSkeleton :columns="8" :rows="5" />
+            <TableCell :colspan="9" class="p-0">
+	              <TableSkeleton :columns="9" :rows="5" />
             </TableCell>
           </TableRow>
           <TableRow v-else-if="refunds.length === 0">
-            <TableCell colspan="8" class="px-6 py-8 text-center text-muted-foreground">{{ t('admin.orderRefunds.empty') }}</TableCell>
+            <TableCell colspan="9" class="px-6 py-8 text-center text-muted-foreground">{{ t('admin.orderRefunds.empty') }}</TableCell>
           </TableRow>
           <TableRow v-for="item in refunds" :key="item.id" class="hover:bg-muted/30">
             <TableCell class="px-6 py-4">
@@ -272,6 +273,12 @@ watch(
             <TableCell class="px-6 py-4 font-mono text-foreground">
               {{ item.amount }} {{ item.currency }}
             </TableCell>
+            <TableCell class="px-6 py-4 text-xs text-foreground">
+              <span v-if="item.payment_fee_refunded" class="font-mono text-emerald-700">
+                {{ item.payment_fee_refunded_amount }} {{ item.currency }}
+              </span>
+              <span v-else class="text-muted-foreground">{{ t('admin.orderRefunds.paymentFeeNotRefunded') }}</span>
+            </TableCell>
             <TableCell class="px-6 py-4 text-xs text-muted-foreground">
               {{ formatDate(item.created_at) }}
             </TableCell>
@@ -299,6 +306,7 @@ watch(
       :model-value="showDetail"
       :refund-id="selectedRefundId"
       @update:model-value="handleDialogOpenChange"
+      @updated="refresh"
     />
   </div>
 </template>

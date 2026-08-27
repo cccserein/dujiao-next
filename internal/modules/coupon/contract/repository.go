@@ -30,6 +30,7 @@ type EligibilityItem struct {
 
 type Repository interface {
 	GetByID(id uint) (*coupondomain.Coupon, error)
+	GetByIDForUpdate(id uint) (*coupondomain.Coupon, error)
 	GetByCode(code string) (*coupondomain.Coupon, error)
 	ListByIDs(ids []uint) ([]coupondomain.Coupon, error)
 	Create(coupon *coupondomain.Coupon) error

@@ -23,17 +23,9 @@
         <span class="text-muted-foreground">{{ t('orderDetail.amountMemberDiscount') }}</span>
         <span class="font-medium text-warning">{{ formatDiscountMoney(order.member_discount_amount, order.currency) }}</span>
       </div>
-      <div class="flex items-center justify-between gap-4">
-        <span class="text-muted-foreground">{{ t('payment.feeRateLabel') }}</span>
-        <span class="font-medium text-foreground">{{ feeRateDisplay }}</span>
-      </div>
-      <div class="flex items-center justify-between gap-4">
-        <span class="text-muted-foreground">{{ t('payment.fixedFeeLabel') }}</span>
-        <span class="font-medium text-foreground">{{ fixedFeeDisplay }}</span>
-      </div>
-      <div class="flex items-center justify-between gap-4">
-        <span class="text-muted-foreground">{{ t('payment.feeAmountLabel') }}</span>
-        <span class="font-medium text-foreground">{{ feeAmountDisplay }}</span>
+      <div v-if="customerFeeApplied" class="flex items-center justify-between gap-4 text-warning">
+        <span>{{ t('payment.feeAmountLabel') }}</span>
+        <span class="font-semibold">{{ customerFeeAmountDisplay }}</span>
       </div>
       <div v-if="paymentResult.wallet_paid_amount !== undefined" class="flex items-center justify-between gap-4">
         <span class="text-muted-foreground">{{ t('payment.walletDeductLabel') }}</span>
@@ -60,9 +52,8 @@ import { useI18n } from 'vue-i18n'
 defineProps<{
   order: any
   paymentResult: any
-  feeRateDisplay: string
-  fixedFeeDisplay: string
-  feeAmountDisplay: string
+  customerFeeApplied: boolean
+  customerFeeAmountDisplay: string
   payableAmountDisplay: string
   walletPaidDisplay: string
   onlinePayDisplay: string

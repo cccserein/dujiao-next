@@ -139,10 +139,12 @@ func normalizeSiteContact(raw interface{}) map[string]interface{} {
 }
 
 func normalizeSiteBrand(raw interface{}) map[string]interface{} {
+	// site_logo 用于前台导航栏、页脚等页面品牌展示，与浏览器 favicon 的 site_icon 保持独立。
 	result := map[string]interface{}{
 		"site_name":        "",
 		"site_url":         "",
 		"site_icon":        "",
+		"site_logo":        "",
 		"site_description": normalizeSiteLocalizedField(nil),
 	}
 	brandMap, ok := raw.(map[string]interface{})
@@ -152,6 +154,8 @@ func normalizeSiteBrand(raw interface{}) map[string]interface{} {
 	result["site_name"] = normalizeSettingText(brandMap["site_name"])
 	result["site_url"] = strings.TrimRight(normalizeSettingText(brandMap["site_url"]), "/")
 	result["site_icon"] = normalizeSettingText(brandMap["site_icon"])
+	// 未配置 Logo 时保留空字符串，让前台继续使用各主题原有的 fallback 行为。
+	result["site_logo"] = normalizeSettingText(brandMap["site_logo"])
 	result["site_description"] = normalizeSiteLocalizedField(brandMap["site_description"])
 	return result
 }

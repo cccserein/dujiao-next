@@ -78,7 +78,6 @@
               <Button variant="outline" size="sm" class="rounded-full" @click="handleCopyPayLink">{{ t('payment.copyPayLink') }}</Button>
               <span v-if="copied" class="text-xs text-[color:var(--teal-strong)]">{{ t('payment.copied') }}</span>
             </div>
-            <div class="mt-2.5 break-all text-xs text-muted-foreground">{{ t('payment.payLinkLabel') }}：{{ paymentResult.pay_url }}</div>
           </div>
         </div>
 
@@ -92,9 +91,8 @@
           <PaymentAmountBreakdown
             :order="order"
             :payment-result="paymentResult"
-            :fee-rate-display="feeRateDisplay"
-            :fixed-fee-display="fixedFeeDisplay"
-            :fee-amount-display="feeAmountDisplay"
+            :customer-fee-applied="customerFeeApplied"
+            :customer-fee-amount-display="customerFeeAmountDisplay"
             :payable-amount-display="payableAmountDisplay"
             :wallet-paid-display="paymentWalletPaidDisplay"
             :online-pay-display="paymentOnlinePayDisplay"
@@ -145,9 +143,6 @@
               <div class="my-1 mb-3 text-[26px] font-extrabold text-foreground tabular-nums">{{ payableAmountDisplay }}</div>
               <div class="grid gap-[7px] text-[12.5px]">
                 <div class="flex justify-between gap-3"><span class="text-muted-foreground">{{ t('orderDetail.amountTotal') }}</span><span class="font-semibold text-foreground">{{ formatMoney(order.total_amount, order.currency) }}</span></div>
-                <div class="flex justify-between gap-3"><span class="text-muted-foreground">{{ t('payment.feeRateLabel') }}</span><span class="font-semibold text-foreground">{{ feeRateDisplay }}</span></div>
-                <div class="flex justify-between gap-3"><span class="text-muted-foreground">{{ t('payment.fixedFeeLabel') }}</span><span class="font-semibold text-foreground">{{ fixedFeeDisplay }}</span></div>
-                <div class="flex justify-between gap-3"><span class="text-muted-foreground">{{ t('payment.feeAmountLabel') }}</span><span class="font-semibold text-foreground">{{ feeAmountDisplay }}</span></div>
                 <div v-if="showBalanceOption && useBalance" class="flex justify-between gap-3"><span class="text-muted-foreground">{{ t('payment.walletDeductLabel') }}</span><span class="font-semibold text-foreground">{{ expectedWalletPaidDisplay }}</span></div>
                 <div v-if="showBalanceOption && useBalance" class="flex justify-between gap-3"><span class="text-muted-foreground">{{ t('payment.onlinePayLabel') }}</span><span class="font-semibold text-foreground">{{ expectedOnlinePayDisplay }}</span></div>
                 <div class="flex justify-between gap-3 border-t pt-2"><span class="text-muted-foreground">{{ t('payment.orderStatus') }}</span><span class="font-semibold text-foreground">{{ statusLabel(order.status) }}</span></div>
@@ -212,8 +207,6 @@
               :channels="channels"
               :model-value="selectedChannelId"
               :show-balance-option="showBalanceOption"
-              :format-channel-fee-rate="formatChannelFeeRate"
-              :format-channel-fixed-fee="formatChannelFixedFee"
               :is-channel-disabled-for-amount="isChannelDisabledForAmount"
               :channel-amount-limit-hint="channelAmountLimitHint"
               @update:model-value="selectedChannelId = $event"
@@ -276,11 +269,10 @@ const {
   paymentResultTitle, paymentGuideTitle, paymentGuideTip, showPayLink, showTelegramPayHint, payLinkOpenedTip,
   cryptoWalletAddress, cryptoPaymentDetails, hasCryptoPaymentDetails, qrUsingPayLinkFallback, showQRCode, qrImageUrl,
   orderExpired, orderCanceled, paymentAlert, countdownExpired, countdownText, showCountdown, showResultView, pollingActive, orderItems,
-  feeRateDisplay, feeAmountDisplay, fixedFeeDisplay, payableAmountDisplay, walletBalanceDisplay,
+  customerFeeApplied, customerFeeAmountDisplay, payableAmountDisplay, walletBalanceDisplay,
   expectedWalletPaidDisplay, expectedOnlinePayDisplay, expectedOnlinePayCents, requiresOnlineChannel,
   paymentWalletPaidDisplay, paymentOnlinePayDisplay, isChannelDisabledForAmount, channelAmountLimitHint, canSubmitPayment,
   formatDate, statusLabel, formatMoney, hasDiscountAmount, formatDiscountMoney, getLocalizedText, orderItemSkuText, fulfillmentTypeLabelText,
-  formatChannelFeeRate, formatChannelFixedFee,
   handleCopyPayLink, handleCopyWalletAddress, handleOpenPayLink, restoreCachedPayment, handleChangePaymentMethod,
   handlePayment, handleGuestAuthSubmit, handleRefresh,
 } = usePayment()

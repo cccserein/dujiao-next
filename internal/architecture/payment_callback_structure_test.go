@@ -16,7 +16,7 @@ func TestPaymentCallbackImplementationIsSplitByResponsibility(t *testing.T) {
 			"HandleCallback", "updateCallbackMeta", "applyPaymentUpdate",
 			"mergeProviderPayload", "markOrderPaid", "validateCallbackPaymentFacts",
 			"updateCallbackMetaWithRepo", "canAdoptVerifiedLegacyDujiaoPayCurrency",
-			"adoptVerifiedLegacyDujiaoPayCurrency",
+			"adoptVerifiedLegacyDujiaoPayCurrency", "creditUnderpaidToWallet",
 		},
 		"payment_service_callback_wallet.go": {
 			"handleWalletRechargeCallback", "applyWalletRechargePaymentUpdate", "canApplyWalletRechargeCallback",

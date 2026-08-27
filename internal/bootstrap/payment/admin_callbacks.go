@@ -1,6 +1,7 @@
 package paymentbootstrap
 
 import (
+	"context"
 	"time"
 
 	paymentapp "github.com/dujiao-next/internal/modules/payment/application"
@@ -107,6 +108,11 @@ func (a adminChannelCatalogAdapter) Update(channel *paymentdomain.PaymentChannel
 
 func (a adminChannelCatalogAdapter) Delete(id uint) error {
 	return a.channels.Delete(id)
+}
+
+func (a adminChannelCatalogAdapter) TestChannelSecurity(ctx context.Context, id uint) (*paymentcontract.GatewaySecurityTestResult, error) {
+	result, err := a.payments.TestChannelSecurity(ctx, id)
+	return result, mapTransportError(err)
 }
 
 type webhookServiceAdapter struct {

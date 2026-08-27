@@ -25,9 +25,10 @@ import (
 
 // AdminManualRefundInput 管理员手动退款输入（不处理钱包/支付渠道）
 type AdminManualRefundInput struct {
-	OrderID uint
-	Amount  money.Amount
-	Remark  string
+	OrderID            uint
+	Amount             money.Amount
+	Remark             string
+	PaymentFeeRefunded bool
 }
 
 // AdminOrderRefundListQuery 管理端退款记录列表查询条件（原始输入）。
@@ -63,6 +64,7 @@ type Service struct {
 	settingService     *settingsapp.Service
 	resellerAccounting resellerAccountingTransactions
 	wallets            *walletapp.Service
+	payments           paymentFeeReader
 }
 
 type affiliateRefundProcessor interface {
@@ -121,6 +123,7 @@ func New(
 	affiliateRefund affiliateRefundProcessor,
 	settingService *settingsapp.Service,
 	wallets *walletapp.Service,
+	payments paymentFeeReader,
 ) *Service {
 	return &Service{
 		orderStore:      orderStore,
@@ -128,6 +131,7 @@ func New(
 		affiliateRefund: affiliateRefund,
 		settingService:  settingService,
 		wallets:         wallets,
+		payments:        payments,
 	}
 }
 
@@ -256,6 +260,9 @@ func (s *Service) AdminManualRefund(input AdminManualRefundInput) (*orderdomain.
 	}
 	recordRemark := strings.TrimSpace(input.Remark)
 	var createdRecord *orderdomain.OrderRefundRecord
+	if s == nil || s.orderStore == nil {
+		return nil, nil, ErrOrderFetchFailed
+	}
 
 	cfg := settingsapp.DefaultOrderRefundConfig()
 	if s.settingService != nil {
@@ -264,6 +271,20 @@ func (s *Service) AdminManualRefund(input AdminManualRefundInput) (*orderdomain.
 			return nil, nil, cfgErr
 		}
 		cfg = cfgLoaded
+	}
+	initialOrder, err := s.orderStore.GetByID(input.OrderID)
+	if err != nil {
+		return nil, nil, ErrOrderFetchFailed
+	}
+	if initialOrder == nil {
+		return nil, nil, ErrOrderNotFound
+	}
+	feeSnapshot := paymentFeeRefundSnapshot{rootOrderID: paymentFeeRefundRootOrderID(initialOrder)}
+	if input.PaymentFeeRefunded {
+		feeSnapshot, err = s.loadPaymentFeeRefundSnapshot(initialOrder)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	if err := s.orderStore.WithinTransaction(func(tx ordercontract.Transaction) error {
@@ -320,7 +341,26 @@ func (s *Service) AdminManualRefund(input AdminManualRefundInput) (*orderdomain.
 				return ErrOrderUpdateFailed
 			}
 		}
-		record, err := s.createRefundRecordTx(orders, &order, constants.OrderRefundTypeManual, amount, recordRemark, now)
+		feeRefundedAmount := money.FromDecimal(decimal.Zero)
+		if input.PaymentFeeRefunded {
+			if paymentFeeRefundRootOrderID(&order) != feeSnapshot.rootOrderID {
+				return ErrOrderFetchFailed
+			}
+			feeRefundedAmount, err = resolvePaymentFeeRefundAmount(orders, feeSnapshot, amount, 0)
+			if err != nil {
+				return err
+			}
+		}
+		record, err := s.createRefundRecordTx(
+			orders,
+			&order,
+			constants.OrderRefundTypeManual,
+			amount,
+			recordRemark,
+			input.PaymentFeeRefunded,
+			feeRefundedAmount,
+			now,
+		)
 		if err != nil {
 			return err
 		}
@@ -436,6 +476,8 @@ func (s *Service) createRefundRecordTx(
 	refundType string,
 	amount decimal.Decimal,
 	remark string,
+	paymentFeeRefunded bool,
+	paymentFeeRefundedAmount money.Amount,
 	now time.Time,
 ) (*orderdomain.OrderRefundRecord, error) {
 	if orders == nil || order == nil {
@@ -446,15 +488,17 @@ func (s *Service) createRefundRecordTx(
 		currency = "CNY"
 	}
 	record := &orderdomain.OrderRefundRecord{
-		UserID:     order.UserID,
-		GuestEmail: order.GuestEmail,
-		OrderID:    order.ID,
-		Type:       strings.TrimSpace(refundType),
-		Amount:     money.FromDecimal(amount.Round(2)),
-		Currency:   currency,
-		Remark:     remark,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		UserID:                   order.UserID,
+		GuestEmail:               order.GuestEmail,
+		OrderID:                  order.ID,
+		Type:                     strings.TrimSpace(refundType),
+		Amount:                   money.FromDecimal(amount.Round(2)),
+		PaymentFeeRefunded:       paymentFeeRefunded,
+		PaymentFeeRefundedAmount: paymentFeeRefundedAmount,
+		Currency:                 currency,
+		Remark:                   remark,
+		CreatedAt:                now,
+		UpdatedAt:                now,
 	}
 	if err := orders.CreateRefundRecord(record); err != nil {
 		return nil, ErrRefundRecordCreateFailed

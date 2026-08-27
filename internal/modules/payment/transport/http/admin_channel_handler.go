@@ -1,9 +1,11 @@
 package paymenthttp
 
 import (
+	"context"
 	"errors"
 	"strings"
 
+	paymentcontract "github.com/dujiao-next/internal/modules/payment/contract"
 	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
 
 	ginutil "github.com/dujiao-next/internal/platform/http/ginutil"
@@ -49,6 +51,7 @@ type AdminChannelCatalog interface {
 	Create(channel *paymentdomain.PaymentChannel) error
 	Update(channel *paymentdomain.PaymentChannel) error
 	Delete(id uint) error
+	TestChannelSecurity(ctx context.Context, id uint) (*paymentcontract.GatewaySecurityTestResult, error)
 }
 
 // CreatePaymentChannelRequest 创建支付渠道请求
@@ -298,6 +301,36 @@ func (h *AdminChannelHandler) GetPaymentChannel(c *gin.Context) {
 	}
 
 	response.Success(c, redactPaymentChannel(channel))
+}
+
+// TestWechatPayPublicKey 使用微信支付官方非交易接口测试已保存渠道的公钥验签配置。
+func (h *AdminChannelHandler) TestWechatPayPublicKey(c *gin.Context) {
+	id, err := ginutil.ParseParamUint(c, "id")
+	if err != nil {
+		ginutil.RespondError(c, response.CodeBadRequest, "error.payment_channel_invalid", nil)
+		return
+	}
+
+	result, err := h.channels.TestChannelSecurity(c.Request.Context(), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrPaymentChannelNotFound):
+			ginutil.RespondError(c, response.CodeNotFound, "error.payment_channel_not_found", nil)
+		case errors.Is(err, ErrPaymentProviderNotSupported):
+			ginutil.RespondError(c, response.CodeBadRequest, "error.wechatpay_key_test_unsupported", nil)
+		case errors.Is(err, ErrPaymentChannelConfigInvalid):
+			ginutil.RespondError(c, response.CodeBadRequest, "error.wechatpay_key_test_config_invalid", err)
+		case errors.Is(err, ErrPaymentGatewayRequestFailed):
+			ginutil.RespondError(c, response.CodeBadRequest, "error.wechatpay_key_test_request_failed", err)
+		case errors.Is(err, ErrPaymentGatewayResponseInvalid):
+			ginutil.RespondError(c, response.CodeBadRequest, "error.wechatpay_key_test_response_invalid", err)
+		default:
+			ginutil.RespondError(c, response.CodeInternal, "error.wechatpay_key_test_failed", err)
+		}
+		return
+	}
+
+	response.Success(c, result)
 }
 
 // GetPaymentChannels 获取支付渠道列表

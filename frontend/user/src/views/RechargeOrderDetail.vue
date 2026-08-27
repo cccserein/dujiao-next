@@ -43,18 +43,14 @@
         <!-- 金额明细 -->
         <div class="rounded-2xl border bg-card shadow-sm p-6">
           <h2 class="text-lg font-bold mb-4">{{ t('rechargeOrder.amountTitle') }}</h2>
-          <div class="grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
+          <div class="grid grid-cols-1 gap-4 text-sm" :class="customerFeeApplied ? 'md:grid-cols-3' : 'md:grid-cols-2'">
             <div class="border rounded-xl p-4">
               <div class="text-xs text-muted-foreground">{{ t('rechargeOrder.rechargeAmount') }}</div>
               <div class="text-foreground font-mono mt-1">{{ formatMoney(recharge.amount, recharge.currency) }}</div>
             </div>
-            <div class="border rounded-xl p-4">
-              <div class="text-xs text-muted-foreground">{{ t('payment.feeRateLabel') }}</div>
-              <div class="text-foreground font-mono mt-1">{{ feeRateDisplay }}</div>
-            </div>
-            <div class="border rounded-xl p-4">
-              <div class="text-xs text-muted-foreground">{{ t('payment.feeAmountLabel') }}</div>
-              <div class="text-foreground font-mono mt-1">{{ formatMoney(recharge.fee_amount, recharge.currency) }}</div>
+            <div v-if="customerFeeApplied" class="border rounded-xl p-4 text-warning">
+              <div class="text-xs">{{ t('payment.feeAmountLabel') }}</div>
+              <div class="font-mono mt-1 font-semibold">{{ formatMoney(recharge.fee_amount, recharge.currency) }}</div>
             </div>
             <div class="border rounded-xl p-4">
               <div class="text-xs text-muted-foreground">{{ t('personalCenter.wallet.payAmountLabel') }}</div>
@@ -125,15 +121,13 @@
                 </div>
               </div>
               <div class="mt-4 flex flex-wrap items-center gap-3">
-                <Button v-if="payLink" type="button" variant="outline" size="sm" @click="handleOpenPayLink">
+                <Button v-if="payLink" type="button" variant="default" size="sm" class="font-bold" @click="handleOpenPayLink">
+                  <ExternalLink class="h-4 w-4" aria-hidden="true" />
                   {{ t('payment.openPayLink') }}
                 </Button>
                 <Button type="button" variant="outline" size="sm" :disabled="checkingPayment" @click="checkPayment">
                   {{ checkingPayment ? t('personalCenter.wallet.checkingPayStatus') : t('personalCenter.wallet.checkPayStatus') }}
                 </Button>
-              </div>
-              <div v-if="payLink" class="mt-3 text-xs text-muted-foreground break-all">
-                {{ t('payment.payLinkLabel') }}：{{ payLink }}
               </div>
               <div v-if="showTelegramPayHint" class="mt-3 text-xs text-muted-foreground">
                 {{ t('payment.telegramExternalHint') }}
@@ -153,6 +147,7 @@
 
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
+import { ExternalLink } from 'lucide-vue-next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import EmptyState from '../components/EmptyState.vue'
@@ -163,7 +158,7 @@ const { t } = useI18n()
 const {
   loading, checkingPayment, recharge, payment, walletAddressCopied, qrImageUrl,
   isPending, payLink, showTelegramPayHint, qrUsingPayLinkFallback, showQRCode,
-  cryptoWalletAddress, cryptoPaymentDetails, hasCryptoPaymentDetails, feeRateDisplay,
+  cryptoWalletAddress, cryptoPaymentDetails, hasCryptoPaymentDetails, customerFeeApplied,
   rechargeStatusText, rechargeStatusVariant, formatMoney, formatDate,
   loadDetail, checkPayment, handleOpenPayLink, handleCopyWalletAddress,
 } = useRechargeOrderDetail()

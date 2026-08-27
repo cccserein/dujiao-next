@@ -2,13 +2,17 @@ package wechatpayadapter
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -78,14 +82,56 @@ func TestWechatpayAdapter_CreatePayment_ConfigInvalidMapped(t *testing.T) {
 // api_v3_key 必须是 32 字节（wechat 规定）。
 func buildMinimalWechatRaw(t *testing.T) jsonmap.JSON {
 	t.Helper()
-	return jsonmap.JSON{
-		"appid":                "wx1234567890abcdef",
-		"mchid":                "1234567890",
-		"merchant_serial_no":   "ABCDEF1234567890",
-		"merchant_private_key": buildTestRSAPrivateKeyPEM(t),
-		"api_v3_key":           "01234567890123456789012345678901", // 32 bytes
-		"notify_url":           "https://example.com/api/v1/payments/webhook/wechat",
+	raw, _ := buildMinimalWechatRawWithSigner(t)
+	return raw
+}
+
+func buildMinimalWechatRawWithSigner(t *testing.T) (jsonmap.JSON, *rsa.PrivateKey) {
+	t.Helper()
+	wechatPayPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate wechatpay RSA key: %v", err)
 	}
+	publicKeyDER, err := x509.MarshalPKIXPublicKey(&wechatPayPrivateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal wechatpay public key: %v", err)
+	}
+	return jsonmap.JSON{
+		"appid":                   "wx1234567890abcdef",
+		"mchid":                   "1234567890",
+		"merchant_serial_no":      "ABCDEF1234567890",
+		"merchant_private_key":    buildTestRSAPrivateKeyPEM(t),
+		"api_v3_key":              "01234567890123456789012345678901", // 32 bytes
+		"verification_mode":       "wechatpay_public_key",
+		"wechatpay_public_key_id": "PUB_KEY_ID_3000000001",
+		"wechatpay_public_key": string(pem.EncodeToMemory(&pem.Block{
+			Type:  "PUBLIC KEY",
+			Bytes: publicKeyDER,
+		})),
+		"notify_url": "https://example.com/api/v1/payments/webhook/wechat",
+	}, wechatPayPrivateKey
+}
+
+func writeAdapterSignedWechatPayResponse(
+	t *testing.T,
+	w http.ResponseWriter,
+	privateKey *rsa.PrivateKey,
+	body string,
+) {
+	t.Helper()
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := "adapter-response"
+	digest := sha256.Sum256([]byte(timestamp + "\n" + nonce + "\n" + body + "\n"))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
+	if err != nil {
+		t.Fatalf("sign adapter response: %v", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Wechatpay-Timestamp", timestamp)
+	w.Header().Set("Wechatpay-Nonce", nonce)
+	w.Header().Set("Wechatpay-Serial", "PUB_KEY_ID_3000000001")
+	w.Header().Set("Wechatpay-Signature", base64.StdEncoding.EncodeToString(signature))
+	_, _ = w.Write([]byte(body))
 }
 
 // TestWechatpayAdapter_ValidateConfig_ValidConfig_C1C2Regression 守护 C1+C2 regression fix:
@@ -149,16 +195,20 @@ func TestWechatpayAdapter_ParseWebhook_NotBlockedByInteractionMode(t *testing.T)
 // 用 QR 模式触发 /v3/pay/transactions/native;httptest 返回 code_url 让
 // wechatpay native 解析成功,进入 wrapper 的 audit 写入块。
 func TestWechatpayAdapter_CreatePayment_ExchangeRate_AuditFields(t *testing.T) {
+	raw, wechatPayPrivateKey := buildMinimalWechatRawWithSigner(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v3/pay/transactions/native" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code_url":"weixin://wxpay/bizpayurl?pr=audit001","prepay_id":"wx-audit-001"}`))
+		writeAdapterSignedWechatPayResponse(
+			t,
+			w,
+			wechatPayPrivateKey,
+			`{"code_url":"weixin://wxpay/bizpayurl?pr=audit001","prepay_id":"wx-audit-001"}`,
+		)
 	}))
 	defer server.Close()
 
-	raw := buildMinimalWechatRaw(t)
 	raw["base_url"] = server.URL
 	// 跨币种:10 USD → 72 CNY (rate 7.2)
 	raw["target_currency"] = "CNY"

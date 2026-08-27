@@ -302,6 +302,7 @@ html[data-telegram-mini-app="true"] body {
 
   .theme-wordmark-text {
     @apply block;
+    min-width: 0;
     font-size: 1rem;
     font-weight: 700;
     letter-spacing: -0.018em;

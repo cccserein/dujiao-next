@@ -8,11 +8,16 @@ import { orderStatusLabel } from '../utils/status'
 import { fulfillmentTypeLabel } from '../utils/fulfillment'
 import { debounceAsync } from '../utils/debounce'
 import { copyText } from '../utils/clipboard'
-import { amountToCents, basisPointsToPercent, calculateFeeCents, centsToAmount, rateToBasisPoints } from '../utils/money'
+import { amountToCents, centsToAmount } from '../utils/money'
 import { buildSkuDisplayTextFromSnapshot } from '../utils/sku'
 import {
   getCachedPaymentRestorePolicy,
   getPaymentResetPolicy,
+  isCustomerSurchargePayment,
+  resolvePaymentInteractionLabelKey,
+  resolvePaymentLinkNavigationTarget,
+  resolvePaymentPresentationMode,
+  resolvePaymentResultTitleKey,
   shouldAutoOpenPaymentLink,
   type PaymentResetReason,
 } from '../utils/paymentResumePolicy'
@@ -181,21 +186,23 @@ export function usePayment() {
 
   const paymentChannelType = computed(() => String(paymentResult.value?.channel_type || resultChannel.value?.channel_type || '').toLowerCase())
 
+  const interactionMode = computed(() => String(paymentResult.value?.interaction_mode || '').trim().toLowerCase())
+  const paymentPresentationMode = computed(() => resolvePaymentPresentationMode(interactionMode.value))
+
   const interactionLabel = computed(() => {
-    if (!paymentResult.value?.interaction_mode) return '-'
-    const mode = String(paymentResult.value.interaction_mode).toLowerCase()
-    if (mode === 'qr') return t('payment.modeQr')
-    if (mode === 'redirect') return t('payment.modeRedirect')
+    const mode = interactionMode.value
+    if (!mode) return '-'
+    const labelKey = resolvePaymentInteractionLabelKey(mode)
+    if (labelKey) return t(labelKey)
     return mode
   })
 
-  const interactionMode = computed(() => String(paymentResult.value?.interaction_mode || '').toLowerCase())
-  const paymentResultTitle = computed(() => interactionMode.value === 'redirect' ? t('payment.resultRedirectTitle') : t('payment.resultTitle'))
-  const paymentGuideTitle = computed(() => interactionMode.value === 'redirect' ? t('payment.redirectTitle') : t('payment.qrTitle'))
-  const paymentGuideTip = computed(() => interactionMode.value === 'redirect' ? t('payment.redirectTip') : t('payment.qrTip'))
+  const paymentResultTitle = computed(() => t(resolvePaymentResultTitleKey(interactionMode.value)))
+  const paymentGuideTitle = computed(() => paymentPresentationMode.value === 'redirect' ? t('payment.redirectTitle') : t('payment.qrTitle'))
+  const paymentGuideTip = computed(() => paymentPresentationMode.value === 'redirect' ? t('payment.redirectTip') : t('payment.qrTip'))
 
   const showPayLink = computed(() => {
-    return interactionMode.value === 'redirect' || Boolean(payLink.value)
+    return paymentPresentationMode.value === 'redirect' || Boolean(payLink.value)
   })
   const isTelegramMiniApp = computed(() => telegramMiniAppStore.isMiniApp && telegramMiniAppStore.isReady)
   const showTelegramPayHint = computed(() => isTelegramMiniApp.value && Boolean(payLink.value))
@@ -267,13 +274,13 @@ export function usePayment() {
   })
   const hasCryptoPaymentDetails = computed(() => cryptoPaymentDetails.value.length > 0)
   const qrFallbackContent = computed(() => {
-    if (interactionMode.value !== 'qr') return ''
+    if (paymentPresentationMode.value !== 'qr') return ''
     if (qrCodeContent.value) return ''
     return payLink.value
   })
   const qrDisplayContent = computed(() => qrCodeContent.value || qrFallbackContent.value)
   const qrUsingPayLinkFallback = computed(() => Boolean(!qrCodeContent.value && qrFallbackContent.value))
-  const showQRCode = computed(() => interactionMode.value === 'qr' && Boolean(qrDisplayContent.value))
+  const showQRCode = computed(() => paymentPresentationMode.value === 'qr' && Boolean(qrDisplayContent.value))
 
   const qrImageUrl = ref('')
   const qrRenderVersion = ref(0)
@@ -383,75 +390,22 @@ export function usePayment() {
   const showResultView = computed(() => Boolean(paymentResult.value && order.value && order.value.status === 'pending_payment' && !orderExpired.value && !orderCanceled.value))
   const pollingActive = computed(() => pollTimer.value !== null)
   const orderItems = computed(() => (Array.isArray(order.value?.items) ? order.value.items : []))
-  const feeRateBasisPoints = computed(() => {
-    if (paymentResult.value?.fee_rate !== undefined) {
-      return rateToBasisPoints(paymentResult.value.fee_rate)
-    }
-    if (selectedChannel.value?.fee_rate !== undefined) {
-      return rateToBasisPoints(selectedChannel.value.fee_rate)
-    }
-    return null
-  })
-  const feeRateDisplay = computed(() => {
-    const rate = feeRateBasisPoints.value
-    const fixed = paymentResult.value?.fixed_fee !== undefined ? paymentResult.value.fixed_fee : selectedChannel.value?.fixed_fee
-
-    let display = ''
-    if (rate !== null && rate > 0) {
-      display += `${basisPointsToPercent(rate)}%`
-    }
-    if (fixed !== undefined && Number(fixed) > 0) {
-      if (display) display += ' + '
-      display += formatMoney(String(fixed), order.value?.currency)
-    }
-
-    if (!display) return t('payment.feeFree')
-    return display
-  })
-  const feeAmountCents = computed(() => {
-    if (paymentResult.value?.fee_amount !== undefined && paymentResult.value?.fee_amount !== null && paymentResult.value?.fee_amount !== '') {
-      return amountToCents(paymentResult.value.fee_amount)
-    }
-    const rate = feeRateBasisPoints.value
-    const base = amountToCents(order.value?.total_amount)
-
-    let fixedFeeCents = 0
-    if (paymentResult.value?.fixed_fee !== undefined) {
-      fixedFeeCents = amountToCents(paymentResult.value.fixed_fee) || 0
-    } else if (selectedChannel.value?.fixed_fee !== undefined) {
-      fixedFeeCents = amountToCents(selectedChannel.value.fixed_fee) || 0
-    }
-
-    if (rate === null || base === null) return null
-    let totalFee = fixedFeeCents
-    if (rate > 0 && base !== null) {
-      const fee = calculateFeeCents(base, rate)
-      if (fee !== null) {
-        totalFee += fee
-      }
-    }
-    return totalFee
-  })
-  const feeAmountDisplay = computed(() => {
-    const value = feeAmountCents.value
-    if (value === null) return '-'
-    return formatMoney(centsToAmount(value), order.value?.currency)
-  })
-  const fixedFeeDisplay = computed(() => {
-    const fixed = paymentResult.value?.fixed_fee !== undefined ? paymentResult.value.fixed_fee : selectedChannel.value?.fixed_fee
-    if (fixed === undefined || fixed === null || fixed === '') {
-      return formatMoney('0.00', order.value?.currency)
-    }
-    return formatMoney(String(fixed), order.value?.currency)
+  const customerFeeApplied = computed(() => isCustomerSurchargePayment(paymentResult.value) && (amountToCents(paymentResult.value?.fee_amount) || 0) > 0)
+  const customerFeeAmountDisplay = computed(() => {
+    if (!customerFeeApplied.value) return ''
+    return formatMoney(String(paymentResult.value?.fee_amount || '0'), order.value?.currency)
   })
   const payableAmountDisplay = computed(() => {
+    if (paymentResult.value?.payable_amount !== undefined && paymentResult.value?.payable_amount !== null && paymentResult.value?.payable_amount !== '') {
+      return formatMoney(String(paymentResult.value.payable_amount), order.value?.currency)
+    }
     if (paymentResult.value?.amount !== undefined && paymentResult.value?.amount !== null && paymentResult.value?.amount !== '') {
       return formatMoney(String(paymentResult.value.amount), order.value?.currency)
     }
-    const base = amountToCents(order.value?.total_amount)
-    const fee = feeAmountCents.value
-    if (base === null || fee === null) return '-'
-    return formatMoney(centsToAmount(base + fee), order.value?.currency)
+    if (paymentResult.value?.online_pay_amount !== undefined && paymentResult.value?.online_pay_amount !== null && paymentResult.value?.online_pay_amount !== '') {
+      return formatMoney(String(paymentResult.value.online_pay_amount), order.value?.currency)
+    }
+    return formatMoney(String(order.value?.total_amount ?? ''), order.value?.currency)
   })
   const walletBalanceDisplay = computed(() => formatMoney(walletBalance.value, order.value?.currency))
   const expectedWalletPaidCents = computed(() => {
@@ -777,10 +731,15 @@ export function usePayment() {
     }
   }
 
-  const openPayLinkInCompatibleWindow = () => {
+  const openPayLinkInCompatibleWindow = (automatic = false) => {
     if (!payLink.value) return
     if (isTelegramMiniApp.value) {
       telegramMiniAppStore.openLink(payLink.value)
+    } else if (resolvePaymentLinkNavigationTarget(automatic) === 'current-tab') {
+      // 支付请求返回后已脱离原始点击事件，浏览器通常会拦截此时创建的新窗口。
+      // 自动收银台跳转使用当前标签页，既可靠也能保留当前 sessionStorage。
+      window.location.assign(payLink.value)
+      return
     } else {
       // 先创建同源空白页，让浏览器按规范复制当前标签页的 sessionStorage；
       // 随后立即切断 opener 再跳转到支付站。这样第三方回跳仍能恢复游客订单，
@@ -822,9 +781,9 @@ export function usePayment() {
         startPolling()
         void captureCurrentPayment({ silent: true })
         startCountdown()
-        // 对 redirect 模式自动打开支付链接
+        // 对 redirect / WAP / page 跳转类模式自动进入收银台。
         if (shouldAutoOpenPaymentLink(data)) {
-          openPayLinkInCompatibleWindow()
+          openPayLinkInCompatibleWindow(true)
         }
       }
     } catch (err) {
@@ -1053,7 +1012,7 @@ export function usePayment() {
       }
       window.scrollTo({ top: 0, behavior: 'smooth' })
       if (shouldAutoOpenPaymentLink(paymentResult.value)) {
-        openPayLinkInCompatibleWindow()
+        openPayLinkInCompatibleWindow(true)
       }
     } catch (err: any) {
       error.value = err.message || t('payment.createFailed')
@@ -1158,7 +1117,7 @@ export function usePayment() {
       startCountdown()
     }
     if (restorePolicy.autoOpenPayLink && shouldAutoOpenPaymentLink(paymentResult.value)) {
-      openPayLinkInCompatibleWindow()
+      openPayLinkInCompatibleWindow(true)
     }
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
@@ -1233,20 +1192,6 @@ export function usePayment() {
     const channelType = String(fallbackChannelType || '').trim()
     if (channelType) return channelTypeLabel(channelType)
     return '-'
-  }
-
-  const formatChannelFeeRate = (channel?: any) => {
-    const basisPoints = rateToBasisPoints(channel?.fee_rate)
-    if (basisPoints === null) return '0.00%'
-    return `${basisPointsToPercent(basisPoints)}%`
-  }
-
-  const formatChannelFixedFee = (channel?: any) => {
-    const fixedFee = channel?.fixed_fee
-    if (fixedFee === null || fixedFee === undefined || fixedFee === '') {
-      return formatMoney('0.00', order.value?.currency)
-    }
-    return formatMoney(String(fixedFee), order.value?.currency)
   }
 
   onMounted(() => {
@@ -1435,9 +1380,8 @@ export function usePayment() {
     pollingActive,
     orderItems,
     // amounts
-    feeRateDisplay,
-    feeAmountDisplay,
-    fixedFeeDisplay,
+    customerFeeApplied,
+    customerFeeAmountDisplay,
     payableAmountDisplay,
     walletBalanceDisplay,
     expectedWalletPaidDisplay,
@@ -1459,8 +1403,6 @@ export function usePayment() {
     getLocalizedText,
     orderItemSkuText,
     fulfillmentTypeLabelText,
-    formatChannelFeeRate,
-    formatChannelFixedFee,
     // actions
     handleCopyPayLink,
     handleCopyWalletAddress,

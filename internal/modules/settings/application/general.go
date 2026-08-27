@@ -53,6 +53,31 @@ type RegistrationEmailDomainPolicy struct {
 	AllowedDomains []string
 }
 
+// PaymentFeeConfig 控制新支付的手续费承担方式，以及旧版加收链接的过渡策略。
+// 配置只影响后续创建/选择支付，不会重写单笔支付已经保存的 FeePolicy 快照。
+type PaymentFeeConfig struct {
+	CustomerFeeEnabled         bool `json:"customer_fee_enabled"`
+	ReuseLegacyOrderFeePayment bool `json:"reuse_legacy_order_fee_payment"`
+}
+
+// DefaultPaymentFeeConfig 默认遵循文档语义：手续费由商户承担，旧加收链接由新链接替换。
+func DefaultPaymentFeeConfig() PaymentFeeConfig {
+	return PaymentFeeConfig{}
+}
+
+// NormalizePaymentFeeConfig 将支付手续费配置限制在明确的布尔开关内。
+func NormalizePaymentFeeConfig(value jsonmap.JSON) jsonmap.JSON {
+	config := DefaultPaymentFeeConfig()
+	if value != nil {
+		config.CustomerFeeEnabled = parseSettingBool(value[constants.SettingFieldCustomerFeeEnabled])
+		config.ReuseLegacyOrderFeePayment = parseSettingBool(value[constants.SettingFieldReuseLegacyOrderFeePayment])
+	}
+	return jsonmap.JSON{
+		constants.SettingFieldCustomerFeeEnabled:         config.CustomerFeeEnabled,
+		constants.SettingFieldReuseLegacyOrderFeePayment: config.ReuseLegacyOrderFeePayment,
+	}
+}
+
 // GetConfig 获取站点配置（合并默认值）
 func (s *Service) GetConfig(defaults map[string]interface{}) (map[string]interface{}, error) {
 	data := make(map[string]interface{})
@@ -378,6 +403,23 @@ func (s *Service) GetWalletOnlyPayment() bool {
 		return false
 	}
 	return parseSettingBool(raw)
+}
+
+// GetPaymentFeeConfig 获取支付手续费与旧订单兼容配置。
+func (s *Service) GetPaymentFeeConfig() PaymentFeeConfig {
+	fallback := DefaultPaymentFeeConfig()
+	if s == nil {
+		return fallback
+	}
+	value, err := s.GetByKey(constants.SettingKeyPaymentConfig)
+	if err != nil || value == nil {
+		return fallback
+	}
+	normalized := NormalizePaymentFeeConfig(value)
+	return PaymentFeeConfig{
+		CustomerFeeEnabled:         parseSettingBool(normalized[constants.SettingFieldCustomerFeeEnabled]),
+		ReuseLegacyOrderFeePayment: parseSettingBool(normalized[constants.SettingFieldReuseLegacyOrderFeePayment]),
+	}
 }
 
 // GetWalletRechargeChannelIDs 获取钱包充值允许的支付渠道ID列表

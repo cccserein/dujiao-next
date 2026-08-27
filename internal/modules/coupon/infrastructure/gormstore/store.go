@@ -9,6 +9,7 @@ import (
 	coupondomain "github.com/dujiao-next/internal/modules/coupon/domain"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Store GORM 优惠券存储。
@@ -32,6 +33,20 @@ func (r *Store) WithTx(tx *gorm.DB) couponcontract.Repository {
 func (r *Store) GetByID(id uint) (*coupondomain.Coupon, error) {
 	var coupon coupondomain.Coupon
 	if err := r.db.Where("deleted_at IS NULL").First(&coupon, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &coupon, nil
+}
+
+// GetByIDForUpdate 在当前事务中锁定优惠券，用于原子校验并占用使用次数。
+func (r *Store) GetByIDForUpdate(id uint) (*coupondomain.Coupon, error) {
+	var coupon coupondomain.Coupon
+	if err := r.db.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("deleted_at IS NULL").
+		First(&coupon, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}

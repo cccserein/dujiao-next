@@ -223,6 +223,45 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *o
 	return nil
 }
 
+// TestChannelSecurity 对已保存的微信支付渠道执行官方非交易安全诊断。
+func (s *PaymentService) TestChannelSecurity(ctx context.Context, channelID uint) (*paymentcontract.GatewaySecurityTestResult, error) {
+	channel, err := s.GetChannel(channelID)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(channel.ProviderType), constants.PaymentProviderOfficial) ||
+		!strings.EqualFold(strings.TrimSpace(channel.ChannelType), constants.PaymentChannelTypeWechat) {
+		return nil, ErrPaymentProviderNotSupported
+	}
+	if s.paymentProviderRegistry == nil {
+		return nil, ErrPaymentProviderNotSupported
+	}
+	provider, ok := s.paymentProviderRegistry.Lookup(channel.ProviderType, channel.ChannelType)
+	if !ok {
+		return nil, ErrPaymentProviderNotSupported
+	}
+	tester, ok := provider.(paymentcontract.GatewaySecurityTester)
+	if !ok {
+		return nil, ErrPaymentProviderNotSupported
+	}
+
+	result, err := tester.TestSecurity(ctx, channel.ConfigJSON)
+	if err != nil {
+		return nil, mapProviderErrorToService(err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("%w: empty security test result", ErrPaymentGatewayResponseInvalid)
+	}
+	paymentLogger(
+		"channel_id", channel.ID,
+		"provider_type", channel.ProviderType,
+		"channel_type", channel.ChannelType,
+		"verification_mode", result.VerificationMode,
+		"response_serial", result.ResponseSerial,
+	).Infow("payment_channel_security_test_success")
+	return result, nil
+}
+
 // ValidateChannel 校验支付渠道配置（admin 端 channel 创建/更新时调用）。
 //
 // P1.2c Task 10: 160 行 switch 退化为 Registry.Lookup + Provider.ValidateConfig 单点。

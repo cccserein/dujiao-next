@@ -13,6 +13,9 @@ type CreatePaymentResp struct {
 	OrderPaid        bool         `json:"order_paid"`
 	WalletPaidAmount money.Amount `json:"wallet_paid_amount"`
 	OnlinePayAmount  money.Amount `json:"online_pay_amount"`
+	PayableAmount    money.Amount `json:"payable_amount"`
+	FeeAmount        money.Amount `json:"fee_amount"`
+	FeePolicy        string       `json:"fee_policy,omitempty"`
 	PaymentID        *uint        `json:"payment_id,omitempty"`
 	ChannelID        *uint        `json:"channel_id,omitempty"`
 	ProviderType     string       `json:"provider_type,omitempty"`
@@ -52,6 +55,9 @@ func NewCreatePaymentResp(result *CreatePaymentResultView) CreatePaymentResp {
 		resp.InteractionMode = result.Payment.InteractionMode
 		resp.PayURL = result.Payment.PayURL
 		resp.QRCode = result.Payment.QRCode
+		resp.PayableAmount = result.Payment.Amount
+		resp.FeeAmount = result.Payment.FeeAmount
+		resp.FeePolicy = result.Payment.FeePolicy
 		resp.ExpiresAt = result.Payment.ExpiredAt
 		info := ExtractCryptoWalletInfo(
 			result.Payment.ProviderType,
@@ -71,20 +77,23 @@ func NewCreatePaymentResp(result *CreatePaymentResultView) CreatePaymentResp {
 
 // LatestPaymentResp 最新待支付记录响应
 type LatestPaymentResp struct {
-	PaymentID       uint       `json:"payment_id"`
-	OrderNo         string     `json:"order_no"`
-	ChannelID       uint       `json:"channel_id"`
-	ChannelName     string     `json:"channel_name,omitempty"`
-	ProviderType    string     `json:"provider_type"`
-	ChannelType     string     `json:"channel_type"`
-	InteractionMode string     `json:"interaction_mode"`
-	PayURL          string     `json:"pay_url"`
-	QRCode          string     `json:"qr_code"`
-	WalletAddress   string     `json:"wallet_address,omitempty"`
-	ChainAmount     string     `json:"chain_amount,omitempty"`
-	Chain           string     `json:"chain,omitempty"`
-	TokenID         string     `json:"token_id,omitempty"`
-	ExpiresAt       *time.Time `json:"expires_at"`
+	PaymentID       uint         `json:"payment_id"`
+	OrderNo         string       `json:"order_no"`
+	ChannelID       uint         `json:"channel_id"`
+	ChannelName     string       `json:"channel_name,omitempty"`
+	ProviderType    string       `json:"provider_type"`
+	ChannelType     string       `json:"channel_type"`
+	InteractionMode string       `json:"interaction_mode"`
+	PayURL          string       `json:"pay_url"`
+	QRCode          string       `json:"qr_code"`
+	WalletAddress   string       `json:"wallet_address,omitempty"`
+	ChainAmount     string       `json:"chain_amount,omitempty"`
+	Chain           string       `json:"chain,omitempty"`
+	TokenID         string       `json:"token_id,omitempty"`
+	ExpiresAt       *time.Time   `json:"expires_at"`
+	PayableAmount   money.Amount `json:"payable_amount"`
+	FeeAmount       money.Amount `json:"fee_amount"`
+	FeePolicy       string       `json:"fee_policy,omitempty"`
 }
 
 // NewLatestPaymentResp 从 Payment + Order 构造响应
@@ -105,7 +114,10 @@ func NewLatestPaymentResp(payment *paymentdomain.Payment, orderNo string) Latest
 		Chain:           info.Chain,
 		TokenID:         info.TokenID,
 		ExpiresAt:       payment.ExpiredAt,
+		PayableAmount:   payment.Amount,
+		FeeAmount:       payment.FeeAmount,
+		FeePolicy:       payment.FeePolicy,
 	}
-	// 排除：OrderID、Amount、FeeRate、FixedFee、FeeAmount、Currency、Status、
+	// 排除：OrderID、FeeRate、FixedFee、Currency、Status、
 	// ProviderRef、GatewayOrderNo、ProviderPayload、CreatedAt、UpdatedAt、PaidAt、CallbackAt
 }

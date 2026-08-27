@@ -17,6 +17,8 @@ import (
 	affiliategormstore "github.com/dujiao-next/internal/modules/affiliate/infrastructure/gormstore"
 	orderapp "github.com/dujiao-next/internal/modules/order/application"
 	ordergormstore "github.com/dujiao-next/internal/modules/order/infrastructure/gormstore"
+	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
+	paymentgormstore "github.com/dujiao-next/internal/modules/payment/infrastructure/gormstore"
 
 	userstore "github.com/dujiao-next/internal/modules/identity/user/infrastructure/gormstore"
 
@@ -60,6 +62,7 @@ func setupOrderRefundWalletTest(t *testing.T) (*Service, *gorm.DB) {
 		&walletdomain.Account{},
 		&walletdomain.Transaction{},
 		&orderdomain.OrderRefundRecord{},
+		&paymentdomain.Payment{},
 		&settingsstore.SettingRecord{},
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
@@ -76,6 +79,7 @@ func setupOrderRefundWalletTest(t *testing.T) (*Service, *gorm.DB) {
 		affiliateSvc,
 		settingSvc,
 		walletService,
+		paymentgormstore.New(db, "test-guest-credential-secret-with-32-bytes"),
 	), db
 }
 

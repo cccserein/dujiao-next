@@ -465,6 +465,9 @@ func postGateway(ctx context.Context, gatewayURL string, params map[string]strin
 	ctx, cancel := common.WithDefaultTimeout(ctx)
 	defer cancel()
 
+	// 支付宝 AOP 网关要求公共参数（尤其是 charset）在解析 POST body 前可见。
+	// 与官方 SDK 保持一致：公共参数放 URL，业务参数 biz_content 放表单 body。
+	protocolParams := make(map[string]string, len(params))
 	form := url.Values{}
 	for key, value := range params {
 		key = strings.TrimSpace(key)
@@ -472,13 +475,18 @@ func postGateway(ctx context.Context, gatewayURL string, params map[string]strin
 		if key == "" || value == "" {
 			continue
 		}
-		form.Set(key, value)
+		if key == "biz_content" {
+			form.Set(key, value)
+			continue
+		}
+		protocolParams[key] = value
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSpace(gatewayURL), strings.NewReader(form.Encode()))
+	requestURL := buildGatewayPayURL(gatewayURL, protocolParams)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("%w: build request failed", ErrRequestFailed)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset="+alipayReqCharset)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)

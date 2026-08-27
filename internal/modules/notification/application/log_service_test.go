@@ -36,6 +36,32 @@ func (notificationEmailStub) SendCustomEmail(recipient, _, _ string) error {
 	return nil
 }
 
+type notificationFeishuCall struct {
+	appID         string
+	appSecret     string
+	receiveIDType string
+	receiveID     string
+	message       string
+}
+
+type notificationFeishuStub struct {
+	calls []notificationFeishuCall
+}
+
+func (s *notificationFeishuStub) SendMessage(_ context.Context, appID, appSecret, receiveIDType, receiveID, message string) error {
+	s.calls = append(s.calls, notificationFeishuCall{
+		appID:         appID,
+		appSecret:     appSecret,
+		receiveIDType: receiveIDType,
+		receiveID:     receiveID,
+		message:       message,
+	})
+	if strings.Contains(receiveID, "failure") {
+		return errors.New("simulated feishu failure")
+	}
+	return nil
+}
+
 type notificationLogRepositoryStub struct {
 	items []domain.NotificationLog
 }
@@ -93,7 +119,7 @@ func setupLogService(t *testing.T) (*Service, *LogService) {
 			},
 		},
 	}
-	service := NewService(notificationSettingsStub{notification: setting}, notificationEmailStub{}, nil, nil, logService, nil)
+	service := NewService(notificationSettingsStub{notification: setting}, notificationEmailStub{}, nil, nil, logService, nil, nil)
 	return service, logService
 }
 
@@ -163,5 +189,62 @@ func TestServiceDispatchSingleEventRecordsPerRecipientResult(t *testing.T) {
 	}
 	if statuses["failure@example.com"] != notificationLogStatusFailed {
 		t.Fatalf("failure recipient status mismatch: %v", statuses)
+	}
+}
+
+func TestServiceDispatchSingleEventSendsFeishuAndRecordsEachRecipient(t *testing.T) {
+	logService := NewLogService(&notificationLogRepositoryStub{})
+	feishuSender := &notificationFeishuStub{}
+	setting := settingsmessaging.NotificationCenterDefaultSetting()
+	setting.DefaultLocale = constants.LocaleZhCN
+	setting.Channels.Feishu = settingsmessaging.FeishuNotificationChannelSetting{
+		Enabled:       true,
+		AppID:         "cli_demo",
+		AppSecret:     "secret",
+		ReceiveIDType: settingsmessaging.FeishuReceiveIDTypeChatID,
+		Recipients:    []string{"oc_success", "oc_failure"},
+	}
+	service := NewService(notificationSettingsStub{notification: setting}, nil, nil, nil, logService, nil, feishuSender)
+
+	err := service.dispatchSingleEvent(context.Background(), setting, queue.NotificationDispatchPayload{
+		EventType: constants.NotificationEventOrderPaidSuccess,
+		BizType:   constants.NotificationBizTypeOrder,
+		BizID:     99,
+		Locale:    constants.LocaleZhCN,
+		Force:     true,
+		Data: map[string]interface{}{
+			"order_no":       "DJ-FEISHU-99",
+			"customer_email": "member@example.com",
+		},
+	})
+	if !errors.Is(err, contract.ErrSendFailed) {
+		t.Fatalf("expected one feishu failure, got %v", err)
+	}
+	if len(feishuSender.calls) != 2 {
+		t.Fatalf("expected two feishu calls, got %d", len(feishuSender.calls))
+	}
+	firstCall := feishuSender.calls[0]
+	if firstCall.appID != "cli_demo" || firstCall.appSecret != "secret" || firstCall.receiveIDType != settingsmessaging.FeishuReceiveIDTypeChatID {
+		t.Fatalf("unexpected feishu credentials or id type: %#v", firstCall)
+	}
+	if !strings.Contains(firstCall.message, "DJ-FEISHU-99") {
+		t.Fatalf("rendered feishu message missing order number: %q", firstCall.message)
+	}
+
+	items, total, listErr := logService.ListForAdmin(contract.LogListFilter{
+		Page: 1, PageSize: 10, Channel: constants.NotificationChannelFeishu,
+	})
+	if listErr != nil {
+		t.Fatalf("list feishu notification logs: %v", listErr)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("expected two feishu logs, total=%d len=%d", total, len(items))
+	}
+	statuses := map[string]string{}
+	for _, item := range items {
+		statuses[item.Recipient] = item.Status
+	}
+	if statuses["oc_success"] != notificationLogStatusSuccess || statuses["oc_failure"] != notificationLogStatusFailed {
+		t.Fatalf("unexpected feishu log statuses: %#v", statuses)
 	}
 }

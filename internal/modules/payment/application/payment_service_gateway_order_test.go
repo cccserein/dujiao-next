@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/dujiao-next/internal/shared/money"
 
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 )
 
 func TestValidateOrderChannelEligibilityUsesPersistedOrderIdentity(t *testing.T) {
@@ -55,9 +57,89 @@ func TestValidateWalletChannelEligibilityRejectsOrderOnlyChannel(t *testing.T) {
 	}
 }
 
+func TestBuildOrderSubject(t *testing.T) {
+	tests := []struct {
+		name  string
+		order *orderdomain.Order
+		want  string
+	}{
+		{
+			name: "nil order",
+			want: "",
+		},
+		{
+			name: "legacy parent item title",
+			order: &orderdomain.Order{
+				OrderNo: "DJ-LEGACY-1",
+				Items: []orderdomain.OrderItem{
+					{TitleJSON: jsonmap.JSON{"zh-CN": "父订单商品"}},
+				},
+			},
+			want: "父订单商品",
+		},
+		{
+			name: "current child item title",
+			order: &orderdomain.Order{
+				OrderNo: "DJ-CURRENT-1",
+				Children: []orderdomain.Order{
+					{
+						Items: []orderdomain.OrderItem{
+							{TitleJSON: jsonmap.JSON{"zh-CN": "子订单商品"}},
+						},
+					},
+				},
+			},
+			want: "子订单商品",
+		},
+		{
+			name: "first non-empty item title",
+			order: &orderdomain.Order{
+				OrderNo: "DJ-CURRENT-2",
+				Children: []orderdomain.Order{
+					{Items: []orderdomain.OrderItem{{TitleJSON: jsonmap.JSON{"zh-CN": " "}}}},
+					{Items: []orderdomain.OrderItem{{TitleJSON: jsonmap.JSON{"en-US": "Second product"}}}},
+				},
+			},
+			want: "Second product",
+		},
+		{
+			name: "parent item takes precedence",
+			order: &orderdomain.Order{
+				OrderNo: "DJ-MIXED-1",
+				Items: []orderdomain.OrderItem{
+					{TitleJSON: jsonmap.JSON{"zh-CN": "父订单商品"}},
+				},
+				Children: []orderdomain.Order{
+					{Items: []orderdomain.OrderItem{{TitleJSON: jsonmap.JSON{"zh-CN": "子订单商品"}}}},
+				},
+			},
+			want: "父订单商品",
+		},
+		{
+			name: "order number fallback",
+			order: &orderdomain.Order{
+				OrderNo: " DJ-FALLBACK-1 ",
+				Children: []orderdomain.Order{
+					{Items: []orderdomain.OrderItem{{TitleJSON: jsonmap.JSON{}}}},
+				},
+			},
+			want: "DJ-FALLBACK-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buildOrderSubject(tt.order); got != tt.want {
+				t.Fatalf("buildOrderSubject() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 type emptyProviderRefProvider struct {
 	onCreate           func(paymentcontract.GatewayCreateInput)
 	displayChannelType string
+	createErr          error
 }
 
 func registerTestGateway(t *testing.T, svc *PaymentService, providerType, channelType string, gateway paymentcontract.GatewayProvider) {
@@ -83,10 +165,79 @@ func (p emptyProviderRefProvider) CreatePayment(_ context.Context, _ jsonmap.JSO
 	if p.onCreate != nil {
 		p.onCreate(input)
 	}
+	if p.createErr != nil {
+		return nil, p.createErr
+	}
 	return &paymentcontract.GatewayCreateResult{
 		QRCodeURL:          "weixin://wxpay/bizpayurl?pr=test",
 		DisplayChannelType: p.displayChannelType,
 	}, nil
+}
+
+type fakeGatewaySecurityTester struct {
+	emptyProviderRefProvider
+	result *paymentcontract.GatewaySecurityTestResult
+	err    error
+}
+
+func (p fakeGatewaySecurityTester) TestSecurity(context.Context, jsonmap.JSON) (*paymentcontract.GatewaySecurityTestResult, error) {
+	return p.result, p.err
+}
+
+func TestChannelSecurityUsesSavedWechatPayChannel(t *testing.T) {
+	service, db := setupPaymentServiceWalletTest(t)
+	channel := &paymentdomain.PaymentChannel{
+		Name:            "WeChat Pay",
+		ProviderType:    constants.PaymentProviderOfficial,
+		ChannelType:     constants.PaymentChannelTypeWechat,
+		InteractionMode: constants.PaymentInteractionQR,
+		ConfigJSON: jsonmap.JSON{
+			"verification_mode": "combined",
+		},
+	}
+	if err := db.Create(channel).Error; err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	expected := &paymentcontract.GatewaySecurityTestResult{
+		VerificationMode:         "wechatpay_public_key",
+		ResponseSerial:           "PUB_KEY_ID_3000000001",
+		RequestSignatureAccepted: true,
+		ResponseSignatureValid:   true,
+		EchoMessageMatched:       true,
+	}
+	registerTestGateway(t, service, constants.PaymentProviderOfficial, constants.PaymentChannelTypeWechat, fakeGatewaySecurityTester{
+		result: expected,
+	})
+
+	result, err := service.TestChannelSecurity(context.Background(), channel.ID)
+	if err != nil {
+		t.Fatalf("test channel security: %v", err)
+	}
+	if result != expected {
+		t.Fatalf("security result = %+v, want %+v", result, expected)
+	}
+}
+
+func TestChannelSecurityMapsSignatureFailure(t *testing.T) {
+	service, db := setupPaymentServiceWalletTest(t)
+	channel := &paymentdomain.PaymentChannel{
+		Name:            "WeChat Pay",
+		ProviderType:    constants.PaymentProviderOfficial,
+		ChannelType:     constants.PaymentChannelTypeWechat,
+		InteractionMode: constants.PaymentInteractionQR,
+		ConfigJSON:      jsonmap.JSON{},
+	}
+	if err := db.Create(channel).Error; err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	registerTestGateway(t, service, constants.PaymentProviderOfficial, constants.PaymentChannelTypeWechat, fakeGatewaySecurityTester{
+		err: paymentcontract.ErrGatewaySignatureInvalid,
+	})
+
+	_, err := service.TestChannelSecurity(context.Background(), channel.ID)
+	if !errors.Is(err, ErrPaymentGatewayResponseInvalid) {
+		t.Fatalf("signature failure = %v, want ErrPaymentGatewayResponseInvalid", err)
+	}
 }
 
 func TestShouldUseGatewayOrderNo(t *testing.T) {
@@ -887,5 +1038,414 @@ func TestHandleCallbackAcceptsGatewayOrderNoForWalletRecharge(t *testing.T) {
 	}
 	if updated == nil || updated.ID != payment.ID {
 		t.Fatalf("expected updated payment")
+	}
+}
+
+func TestCalculatePaymentAmountsKeepsChannelFeeOutOfUserPayment(t *testing.T) {
+	tests := []struct {
+		name        string
+		baseAmount  string
+		feeRate     string
+		fixedFee    string
+		customerFee bool
+		wantPayment string
+		wantFee     string
+		wantPolicy  string
+	}{
+		{
+			name:        "percentage and fixed fee",
+			baseAmount:  "100.00",
+			feeRate:     "2.00",
+			fixedFee:    "1.00",
+			wantPayment: "100.00",
+			wantFee:     "3.00",
+			wantPolicy:  constants.PaymentFeePolicyMerchantAbsorbed,
+		},
+		{
+			name:        "rounds payment and fee independently",
+			baseAmount:  "12.345",
+			feeRate:     "1.50",
+			fixedFee:    "0.10",
+			wantPayment: "12.35",
+			wantFee:     "0.29",
+			wantPolicy:  constants.PaymentFeePolicyMerchantAbsorbed,
+		},
+		{
+			name:        "customer surcharge compatibility mode",
+			baseAmount:  "100.00",
+			feeRate:     "2.00",
+			fixedFee:    "1.00",
+			customerFee: true,
+			wantPayment: "103.00",
+			wantFee:     "3.00",
+			wantPolicy:  constants.PaymentFeePolicyCustomerSurcharge,
+		},
+		{
+			name:        "zero fee",
+			baseAmount:  "88.00",
+			feeRate:     "0",
+			fixedFee:    "0",
+			wantPayment: "88.00",
+			wantFee:     "0.00",
+			wantPolicy:  constants.PaymentFeePolicyNone,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			paymentAmount, feeAmount, feePolicy := calculatePaymentAmounts(
+				decimal.RequireFromString(tt.baseAmount),
+				decimal.RequireFromString(tt.feeRate),
+				decimal.RequireFromString(tt.fixedFee),
+				tt.customerFee,
+			)
+			if got := paymentAmount.StringFixed(2); got != tt.wantPayment {
+				t.Fatalf("payment amount want %s got %s", tt.wantPayment, got)
+			}
+			if got := feeAmount.StringFixed(2); got != tt.wantFee {
+				t.Fatalf("fee amount want %s got %s", tt.wantFee, got)
+			}
+			if feePolicy != tt.wantPolicy {
+				t.Fatalf("fee policy want %s got %s", tt.wantPolicy, feePolicy)
+			}
+		})
+	}
+}
+
+func TestCreateOrderPaymentSendsBaseAmountToGatewayAndStoresMerchantFee(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	now := time.Now()
+	channel := &paymentdomain.PaymentChannel{
+		Name:            "Merchant Fee Gateway",
+		ProviderType:    constants.PaymentProviderOfficial,
+		ChannelType:     constants.PaymentChannelTypeWechat,
+		InteractionMode: constants.PaymentInteractionQR,
+		FeeRate:         money.FromDecimal(decimal.RequireFromString("2.00")),
+		FixedFee:        money.FromDecimal(decimal.RequireFromString("1.00")),
+		ConfigJSON:      jsonmap.JSON{},
+		IsActive:        true,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := db.Create(channel).Error; err != nil {
+		t.Fatalf("create payment channel failed: %v", err)
+	}
+	order := &orderdomain.Order{
+		OrderNo:                 "DJ-MERCHANT-FEE-ORDER",
+		Status:                  constants.OrderStatusPendingPayment,
+		Currency:                "CNY",
+		OriginalAmount:          money.FromDecimal(decimal.NewFromInt(100)),
+		DiscountAmount:          money.FromDecimal(decimal.Zero),
+		PromotionDiscountAmount: money.FromDecimal(decimal.Zero),
+		TotalAmount:             money.FromDecimal(decimal.NewFromInt(100)),
+		WalletPaidAmount:        money.FromDecimal(decimal.Zero),
+		OnlinePaidAmount:        money.FromDecimal(decimal.NewFromInt(100)),
+		RefundedAmount:          money.FromDecimal(decimal.Zero),
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatalf("create order failed: %v", err)
+	}
+
+	var gatewayAmount money.Amount
+	registerTestGateway(t, svc, channel.ProviderType, channel.ChannelType, emptyProviderRefProvider{
+		onCreate: func(input paymentcontract.GatewayCreateInput) {
+			gatewayAmount = input.Amount
+		},
+	})
+
+	result, err := svc.CreatePayment(CreatePaymentInput{
+		OrderID:   order.ID,
+		ChannelID: channel.ID,
+		Context:   context.Background(),
+	})
+	if err != nil {
+		t.Fatalf("create payment failed: %v", err)
+	}
+	if result.Payment == nil {
+		t.Fatal("expected payment result")
+	}
+	if got := gatewayAmount.StringFixed(2); got != "100.00" {
+		t.Fatalf("gateway amount want 100.00 got %s", got)
+	}
+	if got := result.Payment.Amount.StringFixed(2); got != "100.00" {
+		t.Fatalf("payment amount want 100.00 got %s", got)
+	}
+	if got := result.Payment.FeeAmount.StringFixed(2); got != "3.00" {
+		t.Fatalf("merchant fee want 3.00 got %s", got)
+	}
+	if result.Payment.FeePolicy != constants.PaymentFeePolicyMerchantAbsorbed {
+		t.Fatalf("fee policy want %s got %s", constants.PaymentFeePolicyMerchantAbsorbed, result.Payment.FeePolicy)
+	}
+}
+
+func TestCreateWalletRechargeSendsRechargeAmountToGatewayAndStoresMerchantFee(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	now := time.Now()
+	user := &userdomain.User{
+		Email:        "merchant-fee-recharge@example.com",
+		PasswordHash: "hash",
+		Status:       constants.UserStatusActive,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := db.Create(user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	channel := &paymentdomain.PaymentChannel{
+		Name:            "Merchant Fee Recharge Gateway",
+		ProviderType:    constants.PaymentProviderOfficial,
+		ChannelType:     constants.PaymentChannelTypeWechat,
+		InteractionMode: constants.PaymentInteractionQR,
+		FeeRate:         money.FromDecimal(decimal.RequireFromString("2.00")),
+		FixedFee:        money.FromDecimal(decimal.RequireFromString("1.00")),
+		ConfigJSON:      jsonmap.JSON{},
+		IsActive:        true,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := db.Create(channel).Error; err != nil {
+		t.Fatalf("create payment channel failed: %v", err)
+	}
+
+	var gatewayAmount money.Amount
+	registerTestGateway(t, svc, channel.ProviderType, channel.ChannelType, emptyProviderRefProvider{
+		onCreate: func(input paymentcontract.GatewayCreateInput) {
+			gatewayAmount = input.Amount
+		},
+	})
+
+	result, err := svc.CreateWalletRechargePayment(CreateWalletRechargePaymentInput{
+		UserID:    user.ID,
+		ChannelID: channel.ID,
+		Amount:    money.FromDecimal(decimal.NewFromInt(100)),
+		Currency:  "CNY",
+		Context:   context.Background(),
+	})
+	if err != nil {
+		t.Fatalf("create wallet recharge failed: %v", err)
+	}
+	if got := gatewayAmount.StringFixed(2); got != "100.00" {
+		t.Fatalf("gateway amount want 100.00 got %s", got)
+	}
+	if got := result.Payment.Amount.StringFixed(2); got != "100.00" {
+		t.Fatalf("payment amount want 100.00 got %s", got)
+	}
+	if got := result.Payment.FeeAmount.StringFixed(2); got != "3.00" {
+		t.Fatalf("merchant fee want 3.00 got %s", got)
+	}
+	if result.Payment.FeePolicy != constants.PaymentFeePolicyMerchantAbsorbed {
+		t.Fatalf("fee policy want %s got %s", constants.PaymentFeePolicyMerchantAbsorbed, result.Payment.FeePolicy)
+	}
+	if got := result.Recharge.Amount.StringFixed(2); got != "100.00" {
+		t.Fatalf("recharge amount want 100.00 got %s", got)
+	}
+	if got := result.Recharge.PayableAmount.StringFixed(2); got != "100.00" {
+		t.Fatalf("recharge payable amount want 100.00 got %s", got)
+	}
+}
+
+func createFeePolicyOrderFixture(t *testing.T, db *gorm.DB, channelName, orderNo string) (*paymentdomain.PaymentChannel, *orderdomain.Order) {
+	t.Helper()
+	now := time.Now()
+	channel := &paymentdomain.PaymentChannel{
+		Name: channelName, ProviderType: constants.PaymentProviderOfficial,
+		ChannelType: constants.PaymentChannelTypeWechat, InteractionMode: constants.PaymentInteractionQR,
+		FeeRate: money.FromDecimal(decimal.RequireFromString("2.00")), FixedFee: money.FromDecimal(decimal.RequireFromString("1.00")),
+		ConfigJSON: jsonmap.JSON{}, IsActive: true, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(channel).Error; err != nil {
+		t.Fatalf("create payment channel failed: %v", err)
+	}
+	order := &orderdomain.Order{
+		OrderNo: orderNo, Status: constants.OrderStatusPendingPayment, Currency: "CNY",
+		OriginalAmount: money.FromDecimal(decimal.NewFromInt(100)), TotalAmount: money.FromDecimal(decimal.NewFromInt(100)),
+		DiscountAmount: money.FromDecimal(decimal.Zero), PromotionDiscountAmount: money.FromDecimal(decimal.Zero),
+		WalletPaidAmount: money.FromDecimal(decimal.Zero), OnlinePaidAmount: money.FromDecimal(decimal.NewFromInt(100)),
+		RefundedAmount: money.FromDecimal(decimal.Zero), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatalf("create order failed: %v", err)
+	}
+	return channel, order
+}
+
+func TestCreateOrderPaymentSnapshotsCustomerSurchargeCompatibilityMode(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	if _, err := svc.settingService.Update(constants.SettingKeyPaymentConfig, map[string]interface{}{
+		constants.SettingFieldCustomerFeeEnabled: true,
+	}); err != nil {
+		t.Fatalf("enable customer fee compatibility mode: %v", err)
+	}
+	channel, order := createFeePolicyOrderFixture(t, db, "Customer Fee Gateway", "DJ-CUSTOMER-FEE")
+
+	var gatewayAmount money.Amount
+	registerTestGateway(t, svc, channel.ProviderType, channel.ChannelType, emptyProviderRefProvider{onCreate: func(input paymentcontract.GatewayCreateInput) {
+		gatewayAmount = input.Amount
+	}})
+	result, err := svc.CreatePayment(CreatePaymentInput{OrderID: order.ID, ChannelID: channel.ID, Context: context.Background()})
+	if err != nil {
+		t.Fatalf("create customer fee payment failed: %v", err)
+	}
+	if got := gatewayAmount.StringFixed(2); got != "103.00" {
+		t.Fatalf("gateway amount want 103.00 got %s", got)
+	}
+	if result.Payment.FeePolicy != constants.PaymentFeePolicyCustomerSurcharge {
+		t.Fatalf("fee policy want %s got %s", constants.PaymentFeePolicyCustomerSurcharge, result.Payment.FeePolicy)
+	}
+}
+
+func TestCreateOrderPaymentSupersedesLegacyFeeLinkByDefault(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	channel, order := createFeePolicyOrderFixture(t, db, "Legacy Replacement Gateway", "DJ-LEGACY-REPLACE")
+	now := time.Now()
+	legacy := &paymentdomain.Payment{
+		OrderID: order.ID, ChannelID: channel.ID, ProviderType: channel.ProviderType,
+		ChannelType: channel.ChannelType, InteractionMode: channel.InteractionMode,
+		Amount: money.FromDecimal(decimal.NewFromInt(103)), FeeRate: channel.FeeRate, FixedFee: channel.FixedFee,
+		FeeAmount: money.FromDecimal(decimal.NewFromInt(3)), FeePolicy: constants.PaymentFeePolicyLegacyCustomerSurcharge,
+		Currency: "CNY", Status: constants.PaymentStatusPending, QRCode: "legacy-fee-link", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(legacy).Error; err != nil {
+		t.Fatalf("create legacy payment failed: %v", err)
+	}
+	registerTestGateway(t, svc, channel.ProviderType, channel.ChannelType, emptyProviderRefProvider{})
+
+	result, err := svc.CreatePayment(CreatePaymentInput{OrderID: order.ID, ChannelID: channel.ID, Context: context.Background()})
+	if err != nil {
+		t.Fatalf("replace legacy payment failed: %v", err)
+	}
+	if result.Payment.ID == legacy.ID {
+		t.Fatal("legacy fee payment should be replaced")
+	}
+	if result.Payment.FeePolicy != constants.PaymentFeePolicyMerchantAbsorbed || result.Payment.Amount.StringFixed(2) != "100.00" {
+		t.Fatalf("unexpected replacement payment: %+v", result.Payment)
+	}
+	var storedLegacy paymentdomain.Payment
+	if err := db.First(&storedLegacy, legacy.ID).Error; err != nil {
+		t.Fatalf("reload legacy payment failed: %v", err)
+	}
+	if storedLegacy.Status != constants.PaymentStatusExpired || storedLegacy.SupersededAt == nil || storedLegacy.SupersededByPaymentID == nil || *storedLegacy.SupersededByPaymentID != result.Payment.ID {
+		t.Fatalf("legacy payment was not superseded correctly: %+v", storedLegacy)
+	}
+}
+
+func TestCreateOrderPaymentKeepsLegacyFeeLinkWhenReplacementGatewayFails(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	channel, order := createFeePolicyOrderFixture(t, db, "Failed Legacy Replacement Gateway", "DJ-LEGACY-REPLACE-FAIL")
+	now := time.Now()
+	legacy := &paymentdomain.Payment{
+		OrderID: order.ID, ChannelID: channel.ID, ProviderType: channel.ProviderType,
+		ChannelType: channel.ChannelType, InteractionMode: channel.InteractionMode,
+		Amount: money.FromDecimal(decimal.NewFromInt(103)), FeeRate: channel.FeeRate, FixedFee: channel.FixedFee,
+		FeeAmount: money.FromDecimal(decimal.NewFromInt(3)), FeePolicy: constants.PaymentFeePolicyLegacyCustomerSurcharge,
+		Currency: "CNY", Status: constants.PaymentStatusPending, QRCode: "legacy-fee-link", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(legacy).Error; err != nil {
+		t.Fatalf("create legacy payment failed: %v", err)
+	}
+	registerTestGateway(t, svc, channel.ProviderType, channel.ChannelType, emptyProviderRefProvider{createErr: errors.New("gateway unavailable")})
+
+	if _, err := svc.CreatePayment(CreatePaymentInput{OrderID: order.ID, ChannelID: channel.ID, Context: context.Background()}); err == nil {
+		t.Fatal("expected replacement gateway failure")
+	}
+	var storedLegacy paymentdomain.Payment
+	if err := db.First(&storedLegacy, legacy.ID).Error; err != nil {
+		t.Fatalf("reload legacy payment failed: %v", err)
+	}
+	if storedLegacy.Status != constants.PaymentStatusPending || storedLegacy.SupersededAt != nil || storedLegacy.SupersededByPaymentID != nil {
+		t.Fatalf("failed replacement must leave legacy payment usable: %+v", storedLegacy)
+	}
+}
+
+func TestCreateOrderPaymentCanReuseLegacyFeeLinkUntilExpiry(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	if _, err := svc.settingService.Update(constants.SettingKeyPaymentConfig, map[string]interface{}{
+		constants.SettingFieldReuseLegacyOrderFeePayment: true,
+	}); err != nil {
+		t.Fatalf("enable legacy payment reuse: %v", err)
+	}
+	channel, order := createFeePolicyOrderFixture(t, db, "Legacy Reuse Gateway", "DJ-LEGACY-REUSE")
+	now := time.Now()
+	legacy := &paymentdomain.Payment{
+		OrderID: order.ID, ChannelID: channel.ID, ProviderType: channel.ProviderType,
+		ChannelType: channel.ChannelType, InteractionMode: channel.InteractionMode,
+		Amount: money.FromDecimal(decimal.NewFromInt(103)), FeeRate: channel.FeeRate, FixedFee: channel.FixedFee,
+		FeeAmount: money.FromDecimal(decimal.NewFromInt(3)), FeePolicy: constants.PaymentFeePolicyLegacyCustomerSurcharge,
+		Currency: "CNY", Status: constants.PaymentStatusPending, QRCode: "legacy-fee-link", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(legacy).Error; err != nil {
+		t.Fatalf("create legacy payment failed: %v", err)
+	}
+
+	result, err := svc.CreatePayment(CreatePaymentInput{OrderID: order.ID, ChannelID: channel.ID, Context: context.Background()})
+	if err != nil {
+		t.Fatalf("reuse legacy payment failed: %v", err)
+	}
+	if result.Payment.ID != legacy.ID || result.Payment.FeePolicy != constants.PaymentFeePolicyLegacyCustomerSurcharge {
+		t.Fatalf("legacy payment was not reused: %+v", result.Payment)
+	}
+}
+
+func TestSupersededPaymentLateSuccessIsRecordedWithoutDuplicateFulfillment(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	channel, order := createFeePolicyOrderFixture(t, db, "Late Callback Gateway", "DJ-LATE-CALLBACK")
+	now := time.Now()
+	replacement := &paymentdomain.Payment{
+		OrderID: order.ID, ChannelID: channel.ID, ProviderType: channel.ProviderType, ChannelType: channel.ChannelType,
+		InteractionMode: channel.InteractionMode, Amount: money.FromDecimal(decimal.NewFromInt(100)),
+		FeeAmount: money.FromDecimal(decimal.NewFromInt(3)), FeePolicy: constants.PaymentFeePolicyMerchantAbsorbed,
+		Currency: "CNY", Status: constants.PaymentStatusPending, QRCode: "replacement-link", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(replacement).Error; err != nil {
+		t.Fatalf("create replacement payment failed: %v", err)
+	}
+	supersededAt := now.Add(-time.Minute)
+	superseded := &paymentdomain.Payment{
+		OrderID: order.ID, ChannelID: channel.ID, ProviderType: channel.ProviderType, ChannelType: channel.ChannelType,
+		InteractionMode: channel.InteractionMode, Amount: money.FromDecimal(decimal.NewFromInt(103)),
+		FeeAmount: money.FromDecimal(decimal.NewFromInt(3)), FeePolicy: constants.PaymentFeePolicyLegacyCustomerSurcharge,
+		Currency: "CNY", Status: constants.PaymentStatusExpired, QRCode: "legacy-link", ExpiredAt: &supersededAt,
+		SupersededAt: &supersededAt, SupersededByPaymentID: &replacement.ID, CreatedAt: now.Add(-time.Hour), UpdatedAt: supersededAt,
+	}
+	if err := db.Create(superseded).Error; err != nil {
+		t.Fatalf("create superseded payment failed: %v", err)
+	}
+
+	oldSuccess, err := svc.HandleCallback(PaymentCallbackInput{
+		PaymentID: superseded.ID, OrderNo: order.OrderNo, ChannelID: channel.ID,
+		Status: constants.PaymentStatusSuccess, Amount: superseded.Amount, Currency: "CNY", ProviderRef: "late-old-success",
+	})
+	if err != nil {
+		t.Fatalf("handle superseded success failed: %v", err)
+	}
+	if oldSuccess.ExceptionCode != constants.PaymentExceptionSupersededSucceeded {
+		t.Fatalf("superseded success exception = %q", oldSuccess.ExceptionCode)
+	}
+	var storedOrder orderdomain.Order
+	if err := db.First(&storedOrder, order.ID).Error; err != nil {
+		t.Fatalf("reload paid order failed: %v", err)
+	}
+	if storedOrder.Status != constants.OrderStatusPaid || storedOrder.PaidAt == nil {
+		t.Fatalf("superseded payment did not fulfill pending order: %+v", storedOrder)
+	}
+	var expiredReplacement paymentdomain.Payment
+	if err := db.First(&expiredReplacement, replacement.ID).Error; err != nil {
+		t.Fatalf("reload replacement payment failed: %v", err)
+	}
+	if expiredReplacement.Status != constants.PaymentStatusExpired {
+		t.Fatalf("replacement link should expire after old success: %+v", expiredReplacement)
+	}
+
+	duplicate, err := svc.HandleCallback(PaymentCallbackInput{
+		PaymentID: replacement.ID, OrderNo: order.OrderNo, ChannelID: channel.ID,
+		Status: constants.PaymentStatusSuccess, Amount: replacement.Amount, Currency: "CNY", ProviderRef: "late-replacement-success",
+	})
+	if err != nil {
+		t.Fatalf("handle duplicate success failed: %v", err)
+	}
+	if duplicate.Status != constants.PaymentStatusSuccess || duplicate.ExceptionCode != constants.PaymentExceptionDuplicateSucceeded {
+		t.Fatalf("duplicate payment was not flagged: %+v", duplicate)
 	}
 }

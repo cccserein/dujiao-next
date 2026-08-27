@@ -117,6 +117,7 @@ type WalletRechargePaymentPayload struct {
 	TokenID         string              `json:"token_id,omitempty"`
 	ExpiresAt       *time.Time          `json:"expires_at,omitempty"`
 	Status          string              `json:"status,omitempty"`
+	FeePolicy       string              `json:"fee_policy,omitempty"`
 }
 
 // NewWalletRechargePaymentPayload 构造钱包充值支付响应
@@ -141,6 +142,7 @@ func NewWalletRechargePaymentPayload(recharge *walletdomain.RechargeOrder, payme
 		p.QRCode = payment.QRCode
 		p.ExpiresAt = payment.ExpiredAt
 		p.Status = payment.Status
+		p.FeePolicy = payment.FeePolicy
 		info := paymentpresenter.ExtractCryptoWalletInfo(
 			payment.ProviderType,
 			payment.InteractionMode,

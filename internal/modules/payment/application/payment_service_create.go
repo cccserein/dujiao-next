@@ -12,6 +12,7 @@ import (
 	orderapp "github.com/dujiao-next/internal/modules/order/application"
 
 	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
+	settingsapp "github.com/dujiao-next/internal/modules/settings/application"
 
 	"github.com/dujiao-next/internal/constants"
 	walletcontract "github.com/dujiao-next/internal/modules/wallet/contract"
@@ -68,6 +69,10 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 	reusedPending := false
 	orderPaidByWallet := false
 	now := time.Now()
+	feeConfig := settingsapp.DefaultPaymentFeeConfig()
+	if s.settingService != nil {
+		feeConfig = s.settingService.GetPaymentFeeConfig()
+	}
 
 	// 在事务外查询设置，避免 SQLite 单连接池下自锁
 	walletOnly := s.settingService != nil && s.settingService.GetWalletOnlyPayment()
@@ -137,10 +142,14 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 				return ErrPaymentCreateFailed
 			}
 			if existing != nil && hasProviderResult(existing) {
-				reusedPending = true
-				payment = existing
-				order = &lockedOrder
-				return nil
+				legacyFeePayment := existing.FeeAmount.Decimal.IsPositive() &&
+					(existing.FeePolicy == "" || existing.FeePolicy == constants.PaymentFeePolicyLegacyCustomerSurcharge)
+				if !legacyFeePayment || feeConfig.ReuseLegacyOrderFeePayment {
+					reusedPending = true
+					payment = existing
+					order = &lockedOrder
+					return nil
+				}
 			}
 		}
 
@@ -170,6 +179,7 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 				FeeRate:         money.FromDecimal(decimal.Zero),
 				FixedFee:        money.FromDecimal(decimal.Zero),
 				FeeAmount:       money.FromDecimal(decimal.Zero),
+				FeePolicy:       constants.PaymentFeePolicyNone,
 				Currency:        lockedOrder.Currency,
 				Status:          constants.PaymentStatusSuccess,
 				CreatedAt:       paidAt,
@@ -177,6 +187,10 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 				PaidAt:          &paidAt,
 			}
 			if err := paymentRepo.Create(payment); err != nil {
+				return ErrPaymentCreateFailed
+			}
+			// 余额已覆盖全额，订单遗留的在线链接必须同时作废，避免用户再付一次。
+			if _, err := paymentRepo.SupersedePendingByOrderID(lockedOrder.ID, payment.ID, paidAt); err != nil {
 				return ErrPaymentCreateFailed
 			}
 			if err := s.markOrderPaid(tx, &lockedOrder, paidAt); err != nil {
@@ -204,21 +218,18 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			fixedFee = channel.FixedFee.Decimal.Round(2)
 		}
 
-		feeAmount := fixedFee
-		if feeRate.GreaterThan(decimal.Zero) {
-			feeAmount = feeAmount.Add(onlineAmount.Mul(feeRate).Div(decimal.NewFromInt(100))).Round(2)
-		}
-		payableAmount := onlineAmount.Add(feeAmount).Round(2)
+		paymentAmount, feeAmount, feePolicy := calculatePaymentAmounts(onlineAmount, feeRate, fixedFee, feeConfig.CustomerFeeEnabled)
 		payment = &paymentdomain.Payment{
 			OrderID:         lockedOrder.ID,
 			ChannelID:       channel.ID,
 			ProviderType:    channel.ProviderType,
 			ChannelType:     channel.ChannelType,
 			InteractionMode: channel.InteractionMode,
-			Amount:          money.FromDecimal(payableAmount),
+			Amount:          money.FromDecimal(paymentAmount),
 			FeeRate:         money.FromDecimal(feeRate),
 			FixedFee:        money.FromDecimal(fixedFee),
 			FeeAmount:       money.FromDecimal(feeAmount),
+			FeePolicy:       feePolicy,
 			Currency:        lockedOrder.Currency,
 			Status:          constants.PaymentStatusInitiated,
 			CreatedAt:       now,
@@ -251,6 +262,9 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 	}
 
 	if reusedPending {
+		if _, err := s.paymentRepo.SupersedePendingByOrderID(order.ID, payment.ID, time.Now()); err != nil {
+			return nil, ErrPaymentCreateFailed
+		}
 		log.Infow("payment_create_reuse_pending",
 			"payment_id", payment.ID,
 			"provider_type", payment.ProviderType,
@@ -329,6 +343,14 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			)
 		}
 		return nil, err
+	}
+	if _, err := s.paymentRepo.SupersedePendingByOrderID(order.ID, payment.ID, time.Now()); err != nil {
+		log.Errorw("payment_create_supersede_previous_failed",
+			"payment_id", payment.ID,
+			"order_id", order.ID,
+			"error", err,
+		)
+		return nil, ErrPaymentCreateFailed
 	}
 
 	log.Infow("payment_create_success",

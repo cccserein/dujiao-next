@@ -51,7 +51,7 @@ func ResolveLocale(locale, fallback string) string {
 	return normalizeNotificationLocale(locale)
 }
 
-func ComposeTelegramMessage(title, body string) string {
+func ComposePlainTextMessage(title, body string) string {
 	title = strings.TrimSpace(title)
 	body = strings.TrimSpace(body)
 	if title == "" {
@@ -61,6 +61,10 @@ func ComposeTelegramMessage(title, body string) string {
 		return title
 	}
 	return title + "\n\n" + body
+}
+
+func ComposeTelegramMessage(title, body string) string {
+	return ComposePlainTextMessage(title, body)
 }
 
 func JSONToMap(data jsonmap.JSON) map[string]interface{} {

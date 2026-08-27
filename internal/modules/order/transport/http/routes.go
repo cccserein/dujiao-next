@@ -28,6 +28,7 @@ func RegisterAdminRefundWriteRoutes(authorized gin.IRoutes, handler *AdminRefund
 	}
 	authorized.POST("/orders/:id/refund-to-wallet", handler.AdminRefundOrderToWallet)
 	authorized.POST("/orders/:id/manual-refund", handler.AdminManualRefundOrder)
+	authorized.PATCH("/order-refunds/:id/payment-fee", handler.UpdateAdminOrderRefundPaymentFee)
 }
 
 // RegisterUserReadRoutes 注册前台用户订单只读路由。

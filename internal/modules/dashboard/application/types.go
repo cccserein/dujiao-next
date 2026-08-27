@@ -21,6 +21,7 @@ type KPI struct {
 	ProcessingOrders     int64  `json:"processing_orders"`
 	GMVPaid              string `json:"gmv_paid"`
 	TotalCost            string `json:"total_cost"`
+	PaymentFee           string `json:"payment_fee"`
 	TotalProfit          string `json:"total_profit"`
 	ProfitMargin         string `json:"profit_margin"`
 	PaymentsTotal        int64  `json:"payments_total"`

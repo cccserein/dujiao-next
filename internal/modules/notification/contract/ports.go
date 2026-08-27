@@ -55,6 +55,10 @@ type TelegramSender interface {
 	SendMessage(ctx context.Context, chatID, message string) error
 }
 
+type FeishuSender interface {
+	SendMessage(ctx context.Context, appID, appSecret, receiveIDType, receiveID, message string) error
+}
+
 type LogRepository interface {
 	Create(log *domain.NotificationLog) error
 	ListAdmin(filter LogListFilter) ([]domain.NotificationLog, int64, error)

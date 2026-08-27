@@ -58,9 +58,15 @@ type AdminRefundToWalletInput struct {
 
 // AdminManualRefundInput 管理端手动退款输入。
 type AdminManualRefundInput struct {
-	OrderID uint
-	Amount  money.Amount
-	Remark  string
+	OrderID            uint
+	Amount             money.Amount
+	Remark             string
+	PaymentFeeRefunded bool
+}
+
+type AdminUpdateRefundPaymentFeeInput struct {
+	RefundRecordID     uint
+	PaymentFeeRefunded bool
 }
 
 // AdminRefundReader 管理端退款只读端口。
@@ -73,6 +79,7 @@ type AdminRefundReader interface {
 type AdminRefundWriter interface {
 	ParseRefundAmount(raw string) (money.Amount, error)
 	AdminManualRefund(input AdminManualRefundInput) (*orderdomain.Order, *orderdomain.OrderRefundRecord, error)
+	UpdatePaymentFeeRefunded(input AdminUpdateRefundPaymentFeeInput) (*orderdomain.OrderRefundRecord, error)
 }
 
 // AdminWalletRefunder 管理端退款到余额端口。
@@ -126,8 +133,13 @@ type AdminRefundOrderToWalletRequest struct {
 
 // AdminManualRefundOrderRequest 管理端手动退款请求（不处理钱包/支付渠道）
 type AdminManualRefundOrderRequest struct {
-	Amount string `json:"amount" binding:"required"`
-	Remark string `json:"remark"`
+	Amount             string `json:"amount" binding:"required"`
+	Remark             string `json:"remark"`
+	PaymentFeeRefunded bool   `json:"payment_fee_refunded"`
+}
+
+type AdminUpdateRefundPaymentFeeRequest struct {
+	PaymentFeeRefunded *bool `json:"payment_fee_refunded" binding:"required"`
 }
 
 // GetAdminOrderRefunds 获取管理端退款记录列表
@@ -252,9 +264,10 @@ func (h *AdminRefundHandler) AdminManualRefundOrder(c *gin.Context) {
 		return
 	}
 	order, refundRecord, err := h.writes.AdminManualRefund(AdminManualRefundInput{
-		OrderID: orderID,
-		Amount:  amount,
-		Remark:  req.Remark,
+		OrderID:            orderID,
+		Amount:             amount,
+		Remark:             req.Remark,
+		PaymentFeeRefunded: req.PaymentFeeRefunded,
 	})
 	if err != nil {
 		switch {
@@ -274,8 +287,54 @@ func (h *AdminRefundHandler) AdminManualRefundOrder(c *gin.Context) {
 	h.enqueueOrderRefundStatusEmail(order, refundRecord)
 
 	response.Success(c, gin.H{
-		"order": order,
+		"order":         order,
+		"refund_record": refundRecord,
 	})
+}
+
+// UpdateAdminOrderRefundPaymentFee corrects whether a recorded manual refund
+// also returned its original payment fee.
+func (h *AdminRefundHandler) UpdateAdminOrderRefundPaymentFee(c *gin.Context) {
+	if h.writes == nil {
+		ginutil.RespondError(c, response.CodeInternal, "error.order_update_failed", nil)
+		return
+	}
+	id, err := ginutil.ParseParamUint(c, "id")
+	if err != nil {
+		ginutil.RespondError(c, response.CodeBadRequest, "error.bad_request", nil)
+		return
+	}
+	var req AdminUpdateRefundPaymentFeeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		ginutil.RespondBindError(c, err)
+		return
+	}
+	_, err = h.writes.UpdatePaymentFeeRefunded(AdminUpdateRefundPaymentFeeInput{
+		RefundRecordID:     id,
+		PaymentFeeRefunded: *req.PaymentFeeRefunded,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrOrderNotFound):
+			ginutil.RespondError(c, response.CodeNotFound, "error.order_not_found", nil)
+		case errors.Is(err, ErrOrderStatusInvalid):
+			ginutil.RespondError(c, response.CodeBadRequest, "error.order_status_invalid", nil)
+		default:
+			ginutil.RespondError(c, response.CodeInternal, "error.order_update_failed", err)
+		}
+		return
+	}
+	item, err := h.refunds.GetAdminRefundItem(id)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrOrderNotFound):
+			ginutil.RespondError(c, response.CodeNotFound, "error.order_not_found", nil)
+		default:
+			ginutil.RespondError(c, response.CodeInternal, "error.order_fetch_failed", err)
+		}
+		return
+	}
+	response.Success(c, item)
 }
 
 // enqueueOrderRefundStatusEmail 异步发送退款后的订单状态邮件（优先父订单维度）。

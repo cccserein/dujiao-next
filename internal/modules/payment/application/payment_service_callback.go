@@ -1,6 +1,7 @@
 package application
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -9,10 +10,13 @@ import (
 	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
 	paymentcontract "github.com/dujiao-next/internal/modules/payment/contract"
 	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
+	walletcontract "github.com/dujiao-next/internal/modules/wallet/contract"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/shared/jsonmap"
 	"github.com/dujiao-next/internal/shared/money"
+
+	"github.com/shopspring/decimal"
 )
 
 // PaymentCallbackInput 支付回调输入
@@ -131,6 +135,7 @@ func (s *PaymentService) HandleCallback(input PaymentCallbackInput) (*paymentdom
 		"previous_status", previousStatus,
 		"new_status", updated.Status,
 		"order_paid", orderPaid,
+		"exception_code", updated.ExceptionCode,
 	)
 	return updated, nil
 }
@@ -273,6 +278,17 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 			return err
 		}
 
+		orderOpen := lockedOrder.Status == constants.OrderStatusPendingPayment && lockedOrder.PaidAt == nil
+
+		// 金额守恒：一笔支付只有覆盖订单当前的在线应付额才允许履约。
+		// 混合支付切换渠道会退回余额并抬高在线应付额，而旧链接在网关侧依然可付，
+		// 缺少这道校验就能用旧链接的小额付款换到整单商品。
+		requiredOnlineAmount := normalizeOrderAmount(lockedOrder.TotalAmount.Decimal.Sub(lockedOrder.WalletPaidAmount.Decimal))
+		coveredOnlineAmount := paymentCoveredOrderAmount(lockedPayment)
+		underpaid := status == constants.PaymentStatusSuccess && orderOpen &&
+			coveredOnlineAmount.LessThan(requiredOnlineAmount)
+
+		canFulfillOrder := status == constants.PaymentStatusSuccess && orderOpen && !underpaid
 		switch status {
 		case constants.PaymentStatusSuccess:
 			paidAt := now
@@ -280,6 +296,18 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 				paidAt = *input.PaidAt
 			}
 			lockedPayment.PaidAt = &paidAt
+			switch {
+			case underpaid:
+				lockedPayment.ExceptionCode = constants.PaymentExceptionUnderpaidSucceeded
+			case lockedPayment.SupersededAt != nil:
+				lockedPayment.ExceptionCode = constants.PaymentExceptionSupersededSucceeded
+			case !canFulfillOrder:
+				if lockedOrder.PaidAt != nil {
+					lockedPayment.ExceptionCode = constants.PaymentExceptionDuplicateSucceeded
+				} else {
+					lockedPayment.ExceptionCode = constants.PaymentExceptionClosedOrderSucceeded
+				}
+			}
 		case constants.PaymentStatusExpired:
 			lockedPayment.ExpiredAt = &now
 		}
@@ -297,7 +325,12 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 			return ErrPaymentUpdateFailed
 		}
 
-		if status == constants.PaymentStatusSuccess && lockedOrder.Status != constants.OrderStatusPaid {
+		if status == constants.PaymentStatusSuccess {
+			if _, err := paymentRepo.ExpirePendingByOrderIDs([]uint{lockedOrder.ID}, now); err != nil {
+				return ErrPaymentUpdateFailed
+			}
+		}
+		if canFulfillOrder {
 			if err := s.markOrderPaid(tx, lockedOrder, now); err != nil {
 				return err
 			}
@@ -307,6 +340,12 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 				}
 			}
 			orderPaid = true
+		}
+		if underpaid {
+			// 订单不履约，但用户的钱不能吞：转入余额，用户可用余额补齐后重新支付。
+			if err := s.creditUnderpaidToWallet(tx, lockedOrder, lockedPayment, coveredOnlineAmount, requiredOnlineAmount); err != nil {
+				return err
+			}
 		}
 		if (status == constants.PaymentStatusFailed || status == constants.PaymentStatusExpired) && lockedOrder.Status == constants.OrderStatusPendingPayment && s.walletSvc != nil {
 			if _, err := orderapp.ReleaseWalletBalance(s.walletSvc, tx, lockedOrder, constants.WalletTxnTypeOrderRefund, "在线支付失败，退回余额"); err != nil {
@@ -320,6 +359,48 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 		return nil, nil, false, err
 	}
 	return returnVal, processedOrder, orderPaid, nil
+}
+
+// creditUnderpaidToWallet 把"支付成功但金额不足以履约订单"的款项转入用户余额。
+//
+// 订单保持待支付，用户可以用这笔余额补齐后重新发起支付；商家既不发货也不吞款。
+// 以支付 ID 为幂等键，重复回调不会重复入账。游客订单没有钱包账户，只留异常码等待人工处理。
+func (s *PaymentService) creditUnderpaidToWallet(
+	tx paymentcontract.Transaction,
+	order *orderdomain.Order,
+	payment *paymentdomain.Payment,
+	coveredAmount decimal.Decimal,
+	requiredAmount decimal.Decimal,
+) error {
+	if order == nil || payment == nil {
+		return nil
+	}
+	log := paymentLogger(
+		"payment_id", payment.ID,
+		"order_id", order.ID,
+		"order_no", order.OrderNo,
+		"covered_amount", coveredAmount.String(),
+		"required_amount", requiredAmount.String(),
+	)
+	if s.walletSvc == nil || order.UserID == 0 || !coveredAmount.IsPositive() {
+		log.Warnw("payment_callback_underpaid_credit_skipped", "user_id", order.UserID)
+		return nil
+	}
+	orderID := order.ID
+	if _, _, err := s.walletSvc.CreditInTransaction(tx.Wallets(), walletcontract.CreditInput{
+		UserID:    order.UserID,
+		Amount:    money.FromDecimal(coveredAmount),
+		Currency:  order.Currency,
+		Type:      constants.WalletTxnTypeOrderUnderpaidCredit,
+		Reference: fmt.Sprintf("payment:%d:underpaid_credit", payment.ID),
+		Remark:    "支付金额不足以完成订单，款项已转入余额",
+		OrderID:   &orderID,
+	}); err != nil {
+		log.Errorw("payment_callback_underpaid_credit_failed", "user_id", order.UserID, "error", err)
+		return err
+	}
+	log.Warnw("payment_callback_underpaid_credited_to_wallet", "user_id", order.UserID)
+	return nil
 }
 
 // mergeProviderPayload 合并第三方回调原文，同时保留创建支付阶段写入的展示快照等元数据。

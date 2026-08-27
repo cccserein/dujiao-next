@@ -59,6 +59,14 @@ const notificationData = reactive({
       enabled: false,
       recipients_text: '',
     },
+    feishu: {
+      enabled: false,
+      app_id: '',
+      app_secret: '',
+      has_app_secret: false,
+      receive_id_type: 'chat_id',
+      recipients_text: '',
+    },
   },
   scenes: {
     wallet_recharge_success: true,
@@ -138,6 +146,9 @@ const currentChannelTargets = computed(() => {
   if (testForm.channel === 'telegram') {
     return splitRecipients(notificationData.channels.telegram.recipients_text)
   }
+  if (testForm.channel === 'feishu') {
+    return splitRecipients(notificationData.channels.feishu.recipients_text)
+  }
   return splitRecipients(notificationData.channels.email.recipients_text)
 })
 
@@ -174,10 +185,17 @@ const fetchSettings = async () => {
     const notifChannels = notification.channels as Record<string, Record<string, unknown>> | undefined
     const notifEmail = notifChannels?.email
     const notifTelegram = notifChannels?.telegram
+    const notifFeishu = notifChannels?.feishu
     notificationData.channels.email.enabled = !!notifEmail?.enabled
     notificationData.channels.email.recipients_text = joinRecipients(notifEmail?.recipients)
     notificationData.channels.telegram.enabled = !!notifTelegram?.enabled
     notificationData.channels.telegram.recipients_text = joinRecipients(notifTelegram?.recipients)
+    notificationData.channels.feishu.enabled = !!notifFeishu?.enabled
+    notificationData.channels.feishu.app_id = String(notifFeishu?.app_id || '')
+    notificationData.channels.feishu.app_secret = ''
+    notificationData.channels.feishu.has_app_secret = !!notifFeishu?.has_app_secret
+    notificationData.channels.feishu.receive_id_type = String(notifFeishu?.receive_id_type || 'chat_id')
+    notificationData.channels.feishu.recipients_text = joinRecipients(notifFeishu?.recipients)
 
     const notifScenes = notification.scenes as Record<string, unknown> | undefined
     notificationData.scenes.wallet_recharge_success = !!notifScenes?.wallet_recharge_success
@@ -249,6 +267,7 @@ const changeNotificationLogPage = (page: number) => {
 
 const notificationChannelLabel = (value: string) => {
   if (value === 'telegram') return t('admin.settings.notification.channels.telegram.title')
+  if (value === 'feishu') return t('admin.settings.notification.channels.feishu.title')
   return t('admin.settings.notification.channels.email.title')
 }
 
@@ -349,6 +368,7 @@ onMounted(async () => {
             <SelectContent>
               <SelectItem value="email">{{ t('admin.settings.notification.channels.email.title') }}</SelectItem>
               <SelectItem value="telegram">{{ t('admin.settings.notification.channels.telegram.title') }}</SelectItem>
+              <SelectItem value="feishu">{{ t('admin.settings.notification.channels.feishu.title') }}</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -412,6 +432,7 @@ onMounted(async () => {
             <SelectItem value="__all__">{{ t('admin.settings.notification.logs.filters.allChannels') }}</SelectItem>
             <SelectItem value="email">{{ t('admin.settings.notification.channels.email.title') }}</SelectItem>
             <SelectItem value="telegram">{{ t('admin.settings.notification.channels.telegram.title') }}</SelectItem>
+            <SelectItem value="feishu">{{ t('admin.settings.notification.channels.feishu.title') }}</SelectItem>
           </SelectContent>
         </Select>
         <Select v-model="notificationLogFilters.status" @update:modelValue="handleNotificationLogSearch">

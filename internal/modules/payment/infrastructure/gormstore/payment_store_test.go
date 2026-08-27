@@ -381,3 +381,61 @@ func TestStoreListAdminLightweightSkipCount(t *testing.T) {
 		t.Fatalf("display channel type want usdt.arbitrum got %s", rows[0].DisplayChannelType)
 	}
 }
+
+func TestLatestPaymentRestoreExcludesLegacyFeeLinksAndSupersededRows(t *testing.T) {
+	repo, db := setupStoreTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	channel := paymentdomain.PaymentChannel{
+		Name: "restore-filter", ProviderType: constants.PaymentProviderOfficial,
+		ChannelType: constants.PaymentChannelTypeWechat, InteractionMode: constants.PaymentInteractionQR,
+		IsActive: true, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatalf("create channel failed: %v", err)
+	}
+	merchant := paymentdomain.Payment{
+		OrderID: 88, ChannelID: channel.ID, ProviderType: channel.ProviderType, ChannelType: channel.ChannelType,
+		InteractionMode: channel.InteractionMode, Amount: money.FromDecimal(decimal.NewFromInt(100)),
+		FeeAmount: money.FromDecimal(decimal.NewFromInt(3)), FeePolicy: constants.PaymentFeePolicyMerchantAbsorbed,
+		Currency: "CNY", Status: constants.PaymentStatusPending, QRCode: "merchant-link", CreatedAt: now, UpdatedAt: now,
+	}
+	legacy := merchant
+	legacy.Amount = money.FromDecimal(decimal.NewFromInt(103))
+	legacy.FeePolicy = constants.PaymentFeePolicyLegacyCustomerSurcharge
+	legacy.QRCode = "legacy-link"
+	legacy.CreatedAt = now.Add(time.Second)
+	legacy.UpdatedAt = legacy.CreatedAt
+	if err := db.Create(&merchant).Error; err != nil {
+		t.Fatalf("create merchant payment failed: %v", err)
+	}
+	if err := db.Create(&legacy).Error; err != nil {
+		t.Fatalf("create legacy payment failed: %v", err)
+	}
+
+	latest, err := repo.GetLatestPendingByOrder(merchant.OrderID, now)
+	if err != nil {
+		t.Fatalf("get latest restorable payment failed: %v", err)
+	}
+	if latest == nil || latest.ID != merchant.ID {
+		t.Fatalf("legacy fee link must not be restored automatically: %+v", latest)
+	}
+	explicit, err := repo.GetLatestPendingByOrderChannel(merchant.OrderID, channel.ID, now)
+	if err != nil {
+		t.Fatalf("get explicit channel payment failed: %v", err)
+	}
+	if explicit == nil || explicit.ID != legacy.ID {
+		t.Fatalf("service must be able to evaluate legacy compatibility: %+v", explicit)
+	}
+
+	count, err := repo.SupersedePendingByOrderID(merchant.OrderID, merchant.ID, now.Add(2*time.Second))
+	if err != nil || count != 1 {
+		t.Fatalf("supersede legacy payment count=%d err=%v", count, err)
+	}
+	var stored paymentdomain.Payment
+	if err := db.First(&stored, legacy.ID).Error; err != nil {
+		t.Fatalf("reload superseded payment failed: %v", err)
+	}
+	if stored.Status != constants.PaymentStatusExpired || stored.SupersededAt == nil || stored.SupersededByPaymentID == nil || *stored.SupersededByPaymentID != merchant.ID {
+		t.Fatalf("unexpected superseded payment: %+v", stored)
+	}
+}

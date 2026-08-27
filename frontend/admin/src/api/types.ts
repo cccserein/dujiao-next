@@ -437,6 +437,14 @@ export interface AdminPaymentChannel {
   updated_at: string
 }
 
+export interface AdminGatewaySecurityTestResult {
+  verification_mode: string
+  response_serial: string
+  request_signature_accepted: boolean
+  response_signature_valid: boolean
+  echo_message_matched: boolean
+}
+
 // --- Payment ---
 export interface AdminPayment {
   id: number
@@ -452,6 +460,10 @@ export interface AdminPayment {
   fee_rate: number | string
   fixed_fee?: number | string
   fee_amount: number
+  fee_policy?: 'none' | 'merchant_absorbed' | 'customer_surcharge' | 'legacy_customer_surcharge'
+  exception_code?: string
+  superseded_at?: string
+  superseded_by_payment_id?: number
   currency: string
   status: string
   provider_trade_no?: string
@@ -481,6 +493,8 @@ export interface AdminOrderRefund {
   type: string
   refund_type_label?: string
   amount: string
+  payment_fee_refunded: boolean
+  payment_fee_refunded_amount: string
   currency: string
   remark?: string
   items?: AdminOrderItem[]

@@ -562,7 +562,8 @@
         "order_refund": "Order refund",
         "gift_card_redeem": "Gift card redeem",
         "admin_adjust": "Admin adjustment",
-        "admin_refund": "Admin refund"
+        "admin_refund": "Admin refund",
+        "order_underpaid_credit": "Underpaid order credit"
       },
       "errors": {
         "loadFailed": "Failed to load wallet data, please try again later",
@@ -1259,6 +1260,8 @@
     },
     "modeQr": "QR payment",
     "modeRedirect": "Redirect payment",
+    "modeWap": "Mobile web payment",
+    "modePage": "Desktop web payment",
     "payLinkLabel": "Pay link",
     "openPayLink": "Open payment link",
     "copyPayLink": "Copy pay link",

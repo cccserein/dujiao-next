@@ -15,9 +15,8 @@
           {{ t('payment.selected') }}
         </Badge>
       </div>
-      <div class="mt-2 space-y-1 text-xs text-muted-foreground">
-        <div>{{ t('payment.feeLabel') }}：{{ props.formatChannelFeeRate(channel) }}</div>
-        <div>{{ t('payment.fixedFeeLabel') }}：{{ props.formatChannelFixedFee(channel) }}</div>
+      <div v-if="channel.fee_policy === 'customer_surcharge'" class="mt-2 text-xs font-medium text-warning">
+        {{ t('payment.feeLabel') }}：{{ customerFeeDescription(channel) }}
       </div>
       <div v-if="isDisabled(channel)" class="mt-2 text-xs text-warning">
         {{ channelHint(channel) }}
@@ -47,8 +46,6 @@ const props = defineProps<{
   channels: any[]
   modelValue: number | null
   showBalanceOption: boolean
-  formatChannelFeeRate: (channel?: any) => string
-  formatChannelFixedFee: (channel?: any) => string
   isChannelDisabledForAmount?: (channel?: any) => boolean
   channelAmountLimitHint?: (channel?: any) => string
 }>()
@@ -61,6 +58,15 @@ const isDisabled = (channel?: any) => {
 const channelHint = (channel?: any) => {
   if (!props.channelAmountLimitHint) return ''
   return String(props.channelAmountLimitHint(channel) || '')
+}
+
+const customerFeeDescription = (channel?: any) => {
+  const parts: string[] = []
+  const rate = Number(channel?.fee_rate || 0)
+  const fixed = Number(channel?.fixed_fee || 0)
+  if (rate > 0) parts.push(`${rate.toFixed(2)}%`)
+  if (fixed > 0) parts.push(fixed.toFixed(2))
+  return parts.join(' + ') || t('payment.feeFree')
 }
 
 const handleSelect = (channel?: any) => {

@@ -10,6 +10,7 @@ import (
 	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
 
 	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
+	settingsapp "github.com/dujiao-next/internal/modules/settings/application"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/logger"
@@ -90,11 +91,11 @@ func (s *PaymentService) CreateWalletRechargePayment(input CreateWalletRechargeP
 		return nil, err
 	}
 
-	feeAmount := fixedFee
-	if feeRate.GreaterThan(decimal.Zero) {
-		feeAmount = feeAmount.Add(amount.Mul(feeRate).Div(decimal.NewFromInt(100))).Round(2)
+	feeConfig := settingsapp.DefaultPaymentFeeConfig()
+	if s.settingService != nil {
+		feeConfig = s.settingService.GetPaymentFeeConfig()
 	}
-	payableAmount := amount.Add(feeAmount).Round(2)
+	paymentAmount, feeAmount, feePolicy := calculatePaymentAmounts(amount, feeRate, fixedFee, feeConfig.CustomerFeeEnabled)
 	currency := strings.ToUpper(strings.TrimSpace(input.Currency))
 	if currency == "" {
 		currency = "CNY"
@@ -118,10 +119,11 @@ func (s *PaymentService) CreateWalletRechargePayment(input CreateWalletRechargeP
 			ProviderType:    channel.ProviderType,
 			ChannelType:     channel.ChannelType,
 			InteractionMode: channel.InteractionMode,
-			Amount:          money.FromDecimal(payableAmount),
+			Amount:          money.FromDecimal(paymentAmount),
 			FeeRate:         money.FromDecimal(feeRate),
 			FixedFee:        money.FromDecimal(fixedFee),
 			FeeAmount:       money.FromDecimal(feeAmount),
+			FeePolicy:       feePolicy,
 			Currency:        currency,
 			Status:          constants.PaymentStatusInitiated,
 			CreatedAt:       now,
@@ -145,7 +147,7 @@ func (s *PaymentService) CreateWalletRechargePayment(input CreateWalletRechargeP
 			ChannelType:     channel.ChannelType,
 			InteractionMode: channel.InteractionMode,
 			Amount:          money.FromDecimal(amount),
-			PayableAmount:   money.FromDecimal(payableAmount),
+			PayableAmount:   money.FromDecimal(paymentAmount),
 			FeeRate:         money.FromDecimal(feeRate),
 			FeeAmount:       money.FromDecimal(feeAmount),
 			Currency:        currency,

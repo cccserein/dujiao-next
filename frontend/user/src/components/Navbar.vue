@@ -5,14 +5,14 @@
     :style="{ transitionDuration: 'var(--ui-duration-normal)' }">
     <div class="container mx-auto px-4 flex items-center justify-between gap-4">
       <!-- Logo -->
-      <router-link to="/" class="theme-wordmark group relative" :title="brandSiteName">
+      <router-link to="/" class="theme-wordmark group relative gap-3" :title="brandSiteName">
         <img
           v-if="brandLogo"
           :src="brandLogo"
           :alt="brandSiteName"
-          class="h-8 max-w-[180px] object-contain"
+          class="h-8 max-w-[180px] shrink-0 object-contain"
         />
-        <span v-else class="theme-wordmark-text">{{ brandSiteName }}</span>
+        <span class="theme-wordmark-text">{{ brandSiteName }}</span>
       </router-link>
 
       <!-- Desktop Menu -->

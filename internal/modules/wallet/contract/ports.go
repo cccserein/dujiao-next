@@ -19,6 +19,7 @@ type Repository interface {
 
 	CreateTransaction(transaction *walletdomain.Transaction) error
 	GetTransactionByReference(reference string) (*walletdomain.Transaction, error)
+	CountOrderTransactionsByType(orderID uint, transactionType string) (int64, error)
 	ListTransactions(filter TransactionListFilter) ([]walletdomain.Transaction, int64, error)
 
 	CreateRechargeOrder(order *walletdomain.RechargeOrder) error

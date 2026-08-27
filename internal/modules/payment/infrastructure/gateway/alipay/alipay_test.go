@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -76,11 +77,46 @@ func TestCreatePaymentPrecreate(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("expected post request, got %s", r.Method)
 		}
+		mediaType, mediaParams, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("parse content type failed: %v", err)
+		}
+		if mediaType != "application/x-www-form-urlencoded" {
+			t.Fatalf("content type = %s, want application/x-www-form-urlencoded", mediaType)
+		}
+		if got := mediaParams["charset"]; !strings.EqualFold(got, alipayReqCharset) {
+			t.Fatalf("content type charset = %q, want %s", got, alipayReqCharset)
+		}
+
+		query := r.URL.Query()
+		if got := query.Get("method"); got != alipayMethodPrecreate {
+			t.Fatalf("method query = %q, want %s", got, alipayMethodPrecreate)
+		}
+		if got := query.Get("charset"); got != alipayReqCharset {
+			t.Fatalf("charset query = %q, want %s", got, alipayReqCharset)
+		}
+		if query.Has("biz_content") {
+			t.Fatalf("biz_content must be sent in POST body, not query")
+		}
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("parse form failed: %v", err)
 		}
-		if r.Form.Get("method") != "alipay.trade.precreate" {
-			t.Fatalf("expected precreate method, got %s", r.Form.Get("method"))
+		if got := r.PostForm.Get("method"); got != "" {
+			t.Fatalf("method must not be sent in POST body, got %q", got)
+		}
+		bizContentRaw := r.PostForm.Get("biz_content")
+		if bizContentRaw == "" {
+			t.Fatalf("biz_content is missing from POST body")
+		}
+		var bizContent map[string]interface{}
+		if err := json.Unmarshal([]byte(bizContentRaw), &bizContent); err != nil {
+			t.Fatalf("decode biz_content: %v", err)
+		}
+		if got := bizContent["subject"]; got != "测试商品" {
+			t.Fatalf("subject = %v, want 测试商品", got)
+		}
+		if got := bizContent["product_code"]; got != alipayProductCodeFaceToFace {
+			t.Fatalf("product_code = %v, want %s", got, alipayProductCodeFaceToFace)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"alipay_trade_precreate_response": map[string]interface{}{
@@ -135,6 +171,45 @@ func TestCreatePaymentWAPReturnsPayURL(t *testing.T) {
 	}
 	if parsedURL.Query().Get("method") != "alipay.trade.wap.pay" {
 		t.Fatalf("unexpected method: %s", parsedURL.Query().Get("method"))
+	}
+	var bizContent map[string]interface{}
+	if err := json.Unmarshal([]byte(parsedURL.Query().Get("biz_content")), &bizContent); err != nil {
+		t.Fatalf("decode biz_content: %v", err)
+	}
+	if got := bizContent["product_code"]; got != alipayProductCodeQuickWAP {
+		t.Fatalf("product_code = %v, want %s", got, alipayProductCodeQuickWAP)
+	}
+	if parsedURL.Query().Get("sign") == "" {
+		t.Fatalf("expected sign in pay url")
+	}
+}
+
+func TestCreatePaymentPageReturnsPayURL(t *testing.T) {
+	cfg := buildTestConfig("https://openapi.alipay.com/gateway.do")
+	cfg.ReturnURL = "https://example.com/pay/return"
+	result, err := CreatePayment(context.Background(), cfg, CreateInput{
+		OrderNo:   "ORDER-PAGE-1",
+		Amount:    "88.00",
+		Subject:   "电脑网站支付测试",
+		NotifyURL: cfg.NotifyURL,
+		ReturnURL: cfg.ReturnURL,
+	}, constants.PaymentInteractionPage)
+	if err != nil {
+		t.Fatalf("create payment failed: %v", err)
+	}
+	parsedURL, err := url.Parse(result.PayURL)
+	if err != nil {
+		t.Fatalf("parse pay url failed: %v", err)
+	}
+	if got := parsedURL.Query().Get("method"); got != alipayMethodPagePay {
+		t.Fatalf("method = %s, want %s", got, alipayMethodPagePay)
+	}
+	var bizContent map[string]interface{}
+	if err := json.Unmarshal([]byte(parsedURL.Query().Get("biz_content")), &bizContent); err != nil {
+		t.Fatalf("decode biz_content: %v", err)
+	}
+	if got := bizContent["product_code"]; got != alipayProductCodeFastPay {
+		t.Fatalf("product_code = %v, want %s", got, alipayProductCodeFastPay)
 	}
 	if parsedURL.Query().Get("sign") == "" {
 		t.Fatalf("expected sign in pay url")

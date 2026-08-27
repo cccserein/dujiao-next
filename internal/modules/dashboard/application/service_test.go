@@ -7,11 +7,14 @@ import (
 
 	dashboardcontract "github.com/dujiao-next/internal/modules/dashboard/contract"
 	reportingdomain "github.com/dujiao-next/internal/modules/reporting/domain"
+	settingsstorefront "github.com/dujiao-next/internal/modules/settings/schema/storefront"
 )
 
 type dashboardServiceRepoStub struct {
-	overview dashboardcontract.OverviewRow
-	stock    dashboardcontract.StockStatsRow
+	overview       dashboardcontract.OverviewRow
+	profitOverview dashboardcontract.ProfitOverviewRow
+	profitTrends   []dashboardcontract.ProfitTrendRow
+	stock          dashboardcontract.StockStatsRow
 }
 
 func (s dashboardServiceRepoStub) GetOverview(startAt, endAt time.Time) (dashboardcontract.OverviewRow, error) {
@@ -43,11 +46,11 @@ func (s dashboardServiceRepoStub) GetTopProducts(startAt, endAt time.Time, limit
 }
 
 func (s dashboardServiceRepoStub) GetProfitOverview(startAt, endAt time.Time) (dashboardcontract.ProfitOverviewRow, error) {
-	return dashboardcontract.ProfitOverviewRow{}, nil
+	return s.profitOverview, nil
 }
 
 func (s dashboardServiceRepoStub) GetProfitTrends(startAt, endAt time.Time) ([]dashboardcontract.ProfitTrendRow, error) {
-	return []dashboardcontract.ProfitTrendRow{}, nil
+	return s.profitTrends, nil
 }
 
 func (s dashboardServiceRepoStub) GetTopChannels(startAt, endAt time.Time, limit int) ([]dashboardcontract.ChannelRankingRow, error) {
@@ -56,6 +59,14 @@ func (s dashboardServiceRepoStub) GetTopChannels(startAt, endAt time.Time, limit
 
 func (s dashboardServiceRepoStub) GetTotalUserBalance() (float64, error) {
 	return 0, nil
+}
+
+type dashboardSettingReaderStub struct {
+	setting settingsstorefront.DashboardSetting
+}
+
+func (s dashboardSettingReaderStub) GetDashboardSetting() (settingsstorefront.DashboardSetting, error) {
+	return s.setting, nil
 }
 
 func TestDashboardOverviewUsesPaidOrdersForPaymentConversionRate(t *testing.T) {
@@ -117,4 +128,97 @@ func TestDashboardOverviewBuildsInventoryAlertsFromStockStats(t *testing.T) {
 	}
 }
 
+func TestDashboardOverviewAppliesRefundCostPolicy(t *testing.T) {
+	repo := dashboardServiceRepoStub{
+		profitOverview: dashboardcontract.ProfitOverviewRow{
+			TotalRevenue: 0,
+			TotalCost:    3,
+			RefundedCost: 3,
+		},
+	}
+	query := reportingdomain.Query{
+		Range:        "today",
+		Timezone:     "Asia/Shanghai",
+		ForceRefresh: true,
+	}
+
+	withoutReversal, err := NewService(repo, nil).GetOverview(context.Background(), query)
+	if err != nil {
+		t.Fatalf("get overview without cost reversal failed: %v", err)
+	}
+	if withoutReversal.KPI.TotalCost != "3.00" || withoutReversal.KPI.TotalProfit != "-3.00" {
+		t.Fatalf("unexpected metrics without cost reversal: %+v", withoutReversal.KPI)
+	}
+
+	setting := settingsstorefront.DefaultDashboardSetting()
+	setting.Accounting.RefundReversesCost = true
+	withReversal, err := NewService(repo, dashboardSettingReaderStub{setting: setting}).GetOverview(context.Background(), query)
+	if err != nil {
+		t.Fatalf("get overview with cost reversal failed: %v", err)
+	}
+	if withReversal.KPI.TotalCost != "0.00" || withReversal.KPI.TotalProfit != "0.00" {
+		t.Fatalf("unexpected metrics with cost reversal: %+v", withReversal.KPI)
+	}
+}
+
+func TestEffectiveDashboardCostSupportsCrossPeriodRefundAdjustment(t *testing.T) {
+	if got := effectiveDashboardCost(20, 12, false); got != 20 {
+		t.Fatalf("disabled cost reversal want 20 got %.2f", got)
+	}
+	if got := effectiveDashboardCost(20, 12, true); got != 8 {
+		t.Fatalf("enabled cost reversal want 8 got %.2f", got)
+	}
+	if got := effectiveDashboardCost(0, 12, true); got != -12 {
+		t.Fatalf("cross-period cost reversal want -12 got %.2f", got)
+	}
+}
+
+func TestDashboardProfitDeductsPaymentFees(t *testing.T) {
+	service := NewService(dashboardServiceRepoStub{
+		overview: dashboardcontract.OverviewRow{Currency: "CNY"},
+		profitOverview: dashboardcontract.ProfitOverviewRow{
+			TotalRevenue: 100,
+			TotalCost:    40,
+			PaymentFee:   3,
+		},
+	}, nil)
+
+	response, err := service.GetOverview(context.Background(), reportingdomain.Query{
+		Range:    "today",
+		Timezone: "Asia/Shanghai",
+	})
+	if err != nil {
+		t.Fatalf("get overview failed: %v", err)
+	}
+	if response.KPI.TotalCost != "43.00" || response.KPI.PaymentFee != "3.00" || response.KPI.TotalProfit != "57.00" || response.KPI.ProfitMargin != "57.00" {
+		t.Fatalf("unexpected profit KPI: %+v", response.KPI)
+	}
+}
+
+func TestDashboardProfitCombinesRefundCostReversalAndPaymentFees(t *testing.T) {
+	setting := settingsstorefront.DefaultDashboardSetting()
+	setting.Accounting.RefundReversesCost = true
+	service := NewService(dashboardServiceRepoStub{
+		overview: dashboardcontract.OverviewRow{Currency: "CNY"},
+		profitOverview: dashboardcontract.ProfitOverviewRow{
+			TotalRevenue: 100,
+			TotalCost:    40,
+			RefundedCost: 10,
+			PaymentFee:   3,
+		},
+	}, dashboardSettingReaderStub{setting: setting})
+
+	response, err := service.GetOverview(context.Background(), reportingdomain.Query{
+		Range:    "today",
+		Timezone: "Asia/Shanghai",
+	})
+	if err != nil {
+		t.Fatalf("get overview failed: %v", err)
+	}
+	if response.KPI.TotalCost != "33.00" || response.KPI.PaymentFee != "3.00" || response.KPI.TotalProfit != "67.00" || response.KPI.ProfitMargin != "67.00" {
+		t.Fatalf("unexpected combined profit KPI: %+v", response.KPI)
+	}
+}
+
 var _ dashboardcontract.Repository = dashboardServiceRepoStub{}
+var _ dashboardcontract.SettingReader = dashboardSettingReaderStub{}

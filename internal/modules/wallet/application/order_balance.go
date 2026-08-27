@@ -46,7 +46,10 @@ func (s *Service) ApplyOrderBalance(tx walletcontract.Transaction, input walletc
 	if deduct.GreaterThan(total) {
 		deduct = total
 	}
-	reference := orderReference(input.OrderID, constants.WalletTxnTypeOrderPay)
+	reference, err := orderAllocationReference(repository, input.OrderID, constants.WalletTxnTypeOrderPay)
+	if err != nil {
+		return money.Amount{}, err
+	}
 	existing, err := repository.GetTransactionByReference(reference)
 	if err != nil {
 		return money.Amount{}, err
@@ -97,7 +100,10 @@ func (s *Service) ReleaseOrderBalance(
 		return money.FromDecimal(decimal.Zero), nil
 	}
 	repository := tx.Wallets()
-	reference := orderReference(input.OrderID, input.TransactionType)
+	reference, err := orderAllocationReference(repository, input.OrderID, input.TransactionType)
+	if err != nil {
+		return money.Amount{}, err
+	}
 	existing, err := repository.GetTransactionByReference(reference)
 	if err != nil {
 		return money.Amount{}, err

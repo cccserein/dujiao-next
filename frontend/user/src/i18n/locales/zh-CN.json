@@ -515,7 +515,8 @@
         "order_refund": "订单退款",
         "gift_card_redeem": "礼品卡兑换",
         "admin_adjust": "管理员调账",
-        "admin_refund": "管理员退款"
+        "admin_refund": "管理员退款",
+        "order_underpaid_credit": "订单收款不足转入"
       },
       "errors": {
         "loadFailed": "钱包数据加载失败，请稍后重试",
@@ -1212,6 +1213,8 @@
     },
     "modeQr": "二维码支付",
     "modeRedirect": "跳转支付",
+    "modeWap": "手机网站支付",
+    "modePage": "电脑网站支付",
     "payLinkLabel": "跳转链接",
     "openPayLink": "打开支付链接",
     "copyPayLink": "复制支付链接",

@@ -643,6 +643,25 @@ func (s *OrderService) createOrder(input orderCreateParams) (*orderdomain.Order,
 		if result.AppliedCoupon != nil {
 			couponRepo := tx.Coupons()
 			usageRepo := tx.CouponUsages()
+			lockedCoupon, err := couponRepo.GetByIDForUpdate(result.AppliedCoupon.ID)
+			if err != nil {
+				return err
+			}
+			if lockedCoupon == nil {
+				return couponcontract.ErrNotFound
+			}
+			if lockedCoupon.UsageLimit > 0 && lockedCoupon.UsedCount >= lockedCoupon.UsageLimit {
+				return couponcontract.ErrUsageLimit
+			}
+			if lockedCoupon.PerUserLimit > 0 && input.UserID != 0 {
+				count, err := usageRepo.CountByUser(lockedCoupon.ID, input.UserID)
+				if err != nil {
+					return err
+				}
+				if int(count) >= lockedCoupon.PerUserLimit {
+					return couponcontract.ErrPerUserLimit
+				}
+			}
 			usage := &coupondomain.CouponUsage{
 				CouponID:       result.AppliedCoupon.ID,
 				UserID:         input.UserID,
@@ -666,6 +685,15 @@ func (s *OrderService) createOrder(input orderCreateParams) (*orderdomain.Order,
 		return nil
 	})
 	if err != nil {
+		for _, couponErr := range []error{
+			couponcontract.ErrNotFound,
+			couponcontract.ErrUsageLimit,
+			couponcontract.ErrPerUserLimit,
+		} {
+			if errors.Is(err, couponErr) {
+				return nil, err
+			}
+		}
 		for _, riskErr := range []error{
 			orderriskcontract.ErrClientIPUnavailable,
 			orderriskcontract.ErrTooManyPendingOrders,

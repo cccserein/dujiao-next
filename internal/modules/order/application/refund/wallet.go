@@ -151,15 +151,17 @@ func (s *Service) AdminRefundToWallet(
 			currency = "CNY"
 		}
 		record := &orderdomain.OrderRefundRecord{
-			UserID:     order.UserID,
-			GuestEmail: order.GuestEmail,
-			OrderID:    order.ID,
-			Type:       constants.OrderRefundTypeWallet,
-			Amount:     money.FromDecimal(amount),
-			Currency:   currency,
-			Remark:     remark,
-			CreatedAt:  now,
-			UpdatedAt:  now,
+			UserID:                   order.UserID,
+			GuestEmail:               order.GuestEmail,
+			OrderID:                  order.ID,
+			Type:                     constants.OrderRefundTypeWallet,
+			Amount:                   money.FromDecimal(amount),
+			PaymentFeeRefunded:       false,
+			PaymentFeeRefundedAmount: money.FromDecimal(decimal.Zero),
+			Currency:                 currency,
+			Remark:                   remark,
+			CreatedAt:                now,
+			UpdatedAt:                now,
 		}
 		if err := orderRepository.CreateRefundRecord(record); err != nil {
 			return ErrRefundRecordCreateFailed

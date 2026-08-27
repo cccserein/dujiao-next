@@ -10,6 +10,8 @@ import (
 	paymentapp "github.com/dujiao-next/internal/modules/payment/application"
 	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
 	paymentgormstore "github.com/dujiao-next/internal/modules/payment/infrastructure/gormstore"
+	settingsapp "github.com/dujiao-next/internal/modules/settings/application"
+	settingsstore "github.com/dujiao-next/internal/modules/settings/infrastructure/gormstore"
 
 	userdomain "github.com/dujiao-next/internal/modules/identity/user/domain"
 
@@ -22,23 +24,25 @@ import (
 	"gorm.io/gorm"
 )
 
-func setupAvailableChannelService(t *testing.T) (*paymentapp.PaymentService, *gorm.DB) {
+func setupAvailableChannelService(t *testing.T) (*paymentapp.PaymentService, *settingsapp.Service, *gorm.DB) {
 	t.Helper()
 	dsn := fmt.Sprintf("file:payment_available_channels_%d?mode=memory&cache=shared", time.Now().UnixNano())
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite failed: %v", err)
 	}
-	if err := db.AutoMigrate(&paymentdomain.PaymentChannel{}); err != nil {
+	if err := db.AutoMigrate(&paymentdomain.PaymentChannel{}, &settingsstore.SettingRecord{}); err != nil {
 		t.Fatalf("migrate payment channel failed: %v", err)
 	}
+	settingService := settingsapp.NewService(settingsstore.New(db))
 	return paymentapp.NewPaymentService(paymentapp.PaymentServiceOptions{
-		ChannelStore: paymentgormstore.NewChannelStore(db),
-	}), db
+		ChannelStore:   paymentgormstore.NewChannelStore(db),
+		SettingService: settingService,
+	}), settingService, db
 }
 
 func TestGetAvailableChannelsFilters(t *testing.T) {
-	svc, db := setupAvailableChannelService(t)
+	svc, settingService, db := setupAvailableChannelService(t)
 
 	guestOrderInRange := createAvailableChannelFixture(t, db, paymentdomain.PaymentChannel{
 		Name:               "guest-order-in-range",
@@ -168,6 +172,39 @@ func TestGetAvailableChannelsFilters(t *testing.T) {
 	}
 	if _, ok := byID[unrestricted.ID]["icon"]; ok {
 		t.Fatalf("did not expect icon field for channel %d", unrestricted.ID)
+	}
+	for _, channel := range byID {
+		if _, ok := channel["fee_rate"]; ok {
+			t.Fatal("storefront channel response must not expose merchant fee_rate")
+		}
+		if _, ok := channel["fixed_fee"]; ok {
+			t.Fatal("storefront channel response must not expose merchant fixed_fee")
+		}
+	}
+
+	if _, err := settingService.Update(constants.SettingKeyPaymentConfig, map[string]interface{}{
+		constants.SettingFieldCustomerFeeEnabled: true,
+	}); err != nil {
+		t.Fatalf("enable customer fee compatibility mode: %v", err)
+	}
+	channels, err = svc.GetAvailableChannels(paymentapp.AvailablePaymentChannelFilter{
+		TargetAmount: &amount50,
+		User:         memberLv2,
+		PaymentType:  constants.PaymentTypeWallet,
+	})
+	if err != nil {
+		t.Fatalf("GetAvailableChannels() with customer fee compatibility mode error = %v", err)
+	}
+	for _, channel := range indexAvailableChannelsByID(t, channels) {
+		if channel["fee_policy"] != constants.PaymentFeePolicyCustomerSurcharge {
+			t.Fatalf("expected customer fee policy, got %#v", channel["fee_policy"])
+		}
+		if _, ok := channel["fee_rate"]; !ok {
+			t.Fatal("customer fee compatibility mode must expose fee_rate")
+		}
+		if _, ok := channel["fixed_fee"]; !ok {
+			t.Fatal("customer fee compatibility mode must expose fixed_fee")
+		}
 	}
 }
 

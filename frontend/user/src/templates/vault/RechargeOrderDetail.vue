@@ -44,12 +44,8 @@
             <div class="text-xs text-muted-foreground">{{ t('rechargeOrder.rechargeAmount') }}</div>
             <div class="mt-1.5 font-bold tabular-nums">{{ formatMoney(recharge.amount, recharge.currency) }}</div>
           </div>
-          <div class="rounded-md border bg-secondary px-3.5 py-3">
-            <div class="text-xs text-muted-foreground">{{ t('payment.feeRateLabel') }}</div>
-            <div class="mt-1.5 font-bold tabular-nums">{{ feeRateDisplay }}</div>
-          </div>
-          <div class="rounded-md border bg-secondary px-3.5 py-3">
-            <div class="text-xs text-muted-foreground">{{ t('payment.feeAmountLabel') }}</div>
+          <div v-if="customerFeeApplied" class="rounded-md border border-warning/40 bg-secondary px-3.5 py-3 text-warning">
+            <div class="text-xs">{{ t('payment.feeAmountLabel') }}</div>
             <div class="mt-1.5 font-bold tabular-nums">{{ formatMoney(recharge.fee_amount, recharge.currency) }}</div>
           </div>
           <div class="rounded-md border border-primary bg-secondary px-3.5 py-3 text-primary">
@@ -111,7 +107,6 @@
                 {{ checkingPayment ? t('personalCenter.wallet.checkingPayStatus') : t('personalCenter.wallet.checkPayStatus') }}
               </Button>
             </div>
-            <div v-if="payLink" class="mt-3 break-all text-[13px] text-muted-foreground">{{ t('payment.payLinkLabel') }}：{{ payLink }}</div>
             <div v-if="showTelegramPayHint" class="mt-3 text-[13px] text-muted-foreground">{{ t('payment.telegramExternalHint') }}</div>
           </div>
         </div>
@@ -138,7 +133,7 @@ const { t } = useI18n()
 const {
   loading, checkingPayment, recharge, payment, walletAddressCopied, qrImageUrl,
   isPending, payLink, showTelegramPayHint, qrUsingPayLinkFallback, showQRCode,
-  cryptoWalletAddress, cryptoPaymentDetails, hasCryptoPaymentDetails, feeRateDisplay,
+  cryptoWalletAddress, cryptoPaymentDetails, hasCryptoPaymentDetails, customerFeeApplied,
   rechargeStatusText, rechargeStatusVariant, formatMoney, formatDate,
   loadDetail, checkPayment, handleOpenPayLink, handleCopyWalletAddress,
 } = useRechargeOrderDetail()

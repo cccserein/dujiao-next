@@ -26,11 +26,11 @@ func TestPaymentServiceImplementationIsSplitByResponsibility(t *testing.T) {
 			"detachOutboundRequestContext",
 			"shouldUseGatewayOrderNo", "buildGatewayOrderNo", "resolveGatewayOrderNo",
 			"resolveProviderOrderNo", "matchesBusinessOrderNo", "buildPaymentReturnQuery",
-			"applyProviderPayment", "ValidateChannel", "resolveTenantReturnURL",
+			"applyProviderPayment", "TestChannelSecurity", "ValidateChannel", "resolveTenantReturnURL",
 			"tenantReturnPath", "resolveTokenPayOrderUserKey",
 		},
 		"payment_service_rules.go": {
-			"normalizeOrderAmount", "pickFirstNonEmpty",
+			"normalizeOrderAmount", "calculatePaymentAmounts", "paymentCoveredOrderAmount", "pickFirstNonEmpty",
 			"shouldMarkFulfilling", "shouldUseCNYPaymentCurrency", "validatePaymentAmountForChannel",
 			"validatePaymentCurrencyForChannel", "resolveExpireMinutes", "normalizePaymentStatus",
 			"isPaymentStatusValid", "shouldAutoFulfill", "isOrderFullyAutoFulfill",

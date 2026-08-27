@@ -18,6 +18,8 @@ import (
 	affiliatedomain "github.com/dujiao-next/internal/modules/affiliate/domain"
 	affiliategormstore "github.com/dujiao-next/internal/modules/affiliate/infrastructure/gormstore"
 	ordergormstore "github.com/dujiao-next/internal/modules/order/infrastructure/gormstore"
+	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
+	paymentgormstore "github.com/dujiao-next/internal/modules/payment/infrastructure/gormstore"
 
 	userstore "github.com/dujiao-next/internal/modules/identity/user/infrastructure/gormstore"
 
@@ -57,6 +59,7 @@ func setupOrderRefundServiceTest(t *testing.T) (*Service, *gorm.DB) {
 		&walletdomain.Account{},
 		&walletdomain.Transaction{},
 		&orderdomain.OrderRefundRecord{},
+		&paymentdomain.Payment{},
 		&settingsstore.SettingRecord{},
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
@@ -67,7 +70,8 @@ func setupOrderRefundServiceTest(t *testing.T) (*Service, *gorm.DB) {
 	affiliateSvc := affiliateapp.NewService(affiliategormstore.New(db), nil, nil, nil, nil)
 	userRepo := userstore.New(db)
 	settingSvc := settingsapp.NewService(settingsstore.New(db))
-	return New(orderStore, userRepo, affiliateSvc, settingSvc, nil), db
+	paymentStore := paymentgormstore.New(db, "test-guest-credential-secret-with-32-bytes")
+	return New(orderStore, userRepo, affiliateSvc, settingSvc, nil, paymentStore), db
 }
 
 func createOrderRefundTestSiteConnection(t *testing.T, db *gorm.DB, id uint) *siteconnectiondomain.Connection {
@@ -171,6 +175,179 @@ func TestOrderRefundServiceAdminManualRefundGuestCreatesRecord(t *testing.T) {
 	}
 	if refreshedProc.Status != constants.ProcurementStatusFulfilled {
 		t.Fatalf("expected procurement status fulfilled, got: %s", refreshedProc.Status)
+	}
+}
+
+func TestOrderRefundServiceTracksAndCorrectsReturnedPaymentFee(t *testing.T) {
+	svc, db := setupOrderRefundServiceTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	order := &orderdomain.Order{
+		OrderNo:          "REFUND-PAYMENT-FEE-001",
+		UserID:           0,
+		GuestEmail:       "fee-refund@example.com",
+		Status:           constants.OrderStatusCompleted,
+		Currency:         "CNY",
+		OriginalAmount:   money.FromDecimal(decimal.NewFromInt(100)),
+		TotalAmount:      money.FromDecimal(decimal.NewFromInt(100)),
+		OnlinePaidAmount: money.FromDecimal(decimal.NewFromInt(100)),
+		PaidAt:           &now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatalf("create order failed: %v", err)
+	}
+	payment := &paymentdomain.Payment{
+		OrderID:         order.ID,
+		ProviderType:    constants.PaymentProviderOfficial,
+		ChannelType:     constants.PaymentChannelTypeAlipay,
+		InteractionMode: constants.PaymentInteractionRedirect,
+		Amount:          money.FromDecimal(decimal.NewFromInt(100)),
+		FeeAmount:       money.FromDecimal(decimal.RequireFromString("3.00")),
+		FeePolicy:       constants.PaymentFeePolicyMerchantAbsorbed,
+		Currency:        "CNY",
+		Status:          constants.PaymentStatusSuccess,
+		PaidAt:          &now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := db.Create(payment).Error; err != nil {
+		t.Fatalf("create payment failed: %v", err)
+	}
+
+	_, first, err := svc.AdminManualRefund(AdminManualRefundInput{
+		OrderID:            order.ID,
+		Amount:             money.FromDecimal(decimal.NewFromInt(40)),
+		PaymentFeeRefunded: true,
+	})
+	if err != nil {
+		t.Fatalf("first manual refund failed: %v", err)
+	}
+	if !first.PaymentFeeRefunded || !first.PaymentFeeRefundedAmount.Decimal.Equal(decimal.RequireFromString("1.20")) {
+		t.Fatalf("unexpected first payment fee refund: %+v", first)
+	}
+
+	_, second, err := svc.AdminManualRefund(AdminManualRefundInput{
+		OrderID:            order.ID,
+		Amount:             money.FromDecimal(decimal.NewFromInt(60)),
+		PaymentFeeRefunded: true,
+	})
+	if err != nil {
+		t.Fatalf("second manual refund failed: %v", err)
+	}
+	if !second.PaymentFeeRefunded || !second.PaymentFeeRefundedAmount.Decimal.Equal(decimal.RequireFromString("1.80")) {
+		t.Fatalf("unexpected second payment fee refund: %+v", second)
+	}
+
+	updated, err := svc.UpdatePaymentFeeRefunded(UpdatePaymentFeeRefundedInput{
+		RefundRecordID:     first.ID,
+		PaymentFeeRefunded: false,
+	})
+	if err != nil {
+		t.Fatalf("disable payment fee refund failed: %v", err)
+	}
+	if updated.PaymentFeeRefunded || !updated.PaymentFeeRefundedAmount.Decimal.IsZero() {
+		t.Fatalf("disabled payment fee refund not cleared: %+v", updated)
+	}
+
+	updated, err = svc.UpdatePaymentFeeRefunded(UpdatePaymentFeeRefundedInput{
+		RefundRecordID:     first.ID,
+		PaymentFeeRefunded: true,
+	})
+	if err != nil {
+		t.Fatalf("restore payment fee refund failed: %v", err)
+	}
+	if !updated.PaymentFeeRefundedAmount.Decimal.Equal(decimal.RequireFromString("1.20")) {
+		t.Fatalf("restored payment fee refund = %s, want 1.20", updated.PaymentFeeRefundedAmount.StringFixed(2))
+	}
+}
+
+func TestOrderRefundServicePaymentFeeRefundDoesNotRequestSecondConnection(t *testing.T) {
+	svc, db := setupOrderRefundServiceTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	order := &orderdomain.Order{
+		OrderNo:          "REFUND-PAYMENT-FEE-SINGLE-CONNECTION-001",
+		GuestEmail:       "fee-refund-single-connection@example.com",
+		Status:           constants.OrderStatusCompleted,
+		Currency:         "CNY",
+		OriginalAmount:   money.FromDecimal(decimal.NewFromInt(100)),
+		TotalAmount:      money.FromDecimal(decimal.NewFromInt(100)),
+		OnlinePaidAmount: money.FromDecimal(decimal.NewFromInt(100)),
+		PaidAt:           &now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatalf("create order failed: %v", err)
+	}
+	if err := db.Create(&paymentdomain.Payment{
+		OrderID:         order.ID,
+		ProviderType:    constants.PaymentProviderOfficial,
+		ChannelType:     constants.PaymentChannelTypeAlipay,
+		InteractionMode: constants.PaymentInteractionRedirect,
+		Amount:          money.FromDecimal(decimal.NewFromInt(100)),
+		FeeAmount:       money.FromDecimal(decimal.RequireFromString("3.00")),
+		FeePolicy:       constants.PaymentFeePolicyMerchantAbsorbed,
+		Currency:        "CNY",
+		Status:          constants.PaymentStatusSuccess,
+		PaidAt:          &now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}).Error; err != nil {
+		t.Fatalf("create payment failed: %v", err)
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get raw db failed: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+
+	done := make(chan error, 1)
+	go func() {
+		_, record, refundErr := svc.AdminManualRefund(AdminManualRefundInput{
+			OrderID:            order.ID,
+			Amount:             money.FromDecimal(decimal.NewFromInt(40)),
+			PaymentFeeRefunded: true,
+		})
+		if refundErr != nil {
+			done <- fmt.Errorf("manual refund failed: %w", refundErr)
+			return
+		}
+		if record == nil || !record.PaymentFeeRefundedAmount.Decimal.Equal(decimal.RequireFromString("1.20")) {
+			done <- fmt.Errorf("unexpected manual refund fee: %+v", record)
+			return
+		}
+		if _, updateErr := svc.UpdatePaymentFeeRefunded(UpdatePaymentFeeRefundedInput{
+			RefundRecordID:     record.ID,
+			PaymentFeeRefunded: false,
+		}); updateErr != nil {
+			done <- fmt.Errorf("disable payment fee refund failed: %w", updateErr)
+			return
+		}
+		updated, updateErr := svc.UpdatePaymentFeeRefunded(UpdatePaymentFeeRefundedInput{
+			RefundRecordID:     record.ID,
+			PaymentFeeRefunded: true,
+		})
+		if updateErr != nil {
+			done <- fmt.Errorf("restore payment fee refund failed: %w", updateErr)
+			return
+		}
+		if updated == nil || !updated.PaymentFeeRefundedAmount.Decimal.Equal(decimal.RequireFromString("1.20")) {
+			done <- fmt.Errorf("unexpected restored payment fee: %+v", updated)
+			return
+		}
+		done <- nil
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("payment fee refund deadlocked with MaxOpenConns=1")
 	}
 }
 

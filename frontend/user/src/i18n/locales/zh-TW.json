@@ -562,7 +562,8 @@
         "order_refund": "訂單退款",
         "gift_card_redeem": "禮品卡兌換",
         "admin_adjust": "管理員調帳",
-        "admin_refund": "管理員退款"
+        "admin_refund": "管理員退款",
+        "order_underpaid_credit": "訂單收款不足轉入"
       },
       "errors": {
         "loadFailed": "錢包資料載入失敗，請稍後重試",
@@ -1259,6 +1260,8 @@
     },
     "modeQr": "二維碼支付",
     "modeRedirect": "跳轉支付",
+    "modeWap": "手機網站支付",
+    "modePage": "電腦網站支付",
     "payLinkLabel": "跳轉連結",
     "openPayLink": "開啟支付連結",
     "copyPayLink": "複製支付連結",

@@ -54,6 +54,7 @@ func RegisterAdminChannelRoutes(authorized gin.IRoutes, handler *AdminChannelHan
 	authorized.POST("/payment-channels", handler.CreatePaymentChannel)
 	authorized.GET("/payment-channels", handler.GetPaymentChannels)
 	authorized.GET("/payment-channels/:id", handler.GetPaymentChannel)
+	authorized.POST("/payment-channels/:id/wechatpay-public-key-test", handler.TestWechatPayPublicKey)
 	authorized.PUT("/payment-channels/:id", handler.UpdatePaymentChannel)
 	authorized.DELETE("/payment-channels/:id", handler.DeletePaymentChannel)
 }

@@ -243,11 +243,20 @@ func (a orderAdminRefundAdapter) ParseRefundAmount(raw string) (money.Amount, er
 
 func (a orderAdminRefundAdapter) AdminManualRefund(input ordertransport.AdminManualRefundInput) (*orderdomain.Order, *orderdomain.OrderRefundRecord, error) {
 	order, record, err := a.refunds.AdminManualRefund(orderrefund.AdminManualRefundInput{
-		OrderID: input.OrderID,
-		Amount:  input.Amount,
-		Remark:  input.Remark,
+		OrderID:            input.OrderID,
+		Amount:             input.Amount,
+		Remark:             input.Remark,
+		PaymentFeeRefunded: input.PaymentFeeRefunded,
 	})
 	return order, record, mapOrderTransportError(err)
+}
+
+func (a orderAdminRefundAdapter) UpdatePaymentFeeRefunded(input ordertransport.AdminUpdateRefundPaymentFeeInput) (*orderdomain.OrderRefundRecord, error) {
+	record, err := a.refunds.UpdatePaymentFeeRefunded(orderrefund.UpdatePaymentFeeRefundedInput{
+		RefundRecordID:     input.RefundRecordID,
+		PaymentFeeRefunded: input.PaymentFeeRefunded,
+	})
+	return record, mapOrderTransportError(err)
 }
 
 type orderAdminWalletRefundAdapter struct {

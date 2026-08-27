@@ -60,6 +60,16 @@ type GatewayCallbackResult struct {
 	Payload     jsonmap.JSON
 }
 
+// GatewaySecurityTestResult 是支付网关安全能力的只读诊断结果。
+// 结果只包含可公开的校验事实，不包含请求体、私钥或 API 密钥。
+type GatewaySecurityTestResult struct {
+	VerificationMode         string `json:"verification_mode"`
+	ResponseSerial           string `json:"response_serial"`
+	RequestSignatureAccepted bool   `json:"request_signature_accepted"`
+	ResponseSignatureValid   bool   `json:"response_signature_valid"`
+	EchoMessageMatched       bool   `json:"echo_message_matched"`
+}
+
 // GatewayProvider 是所有支付网关适配器必须实现的最小能力。
 type GatewayProvider interface {
 	Type() string
@@ -75,6 +85,12 @@ type GatewayCapturer interface {
 type GatewayWebhooker interface {
 	GatewayProvider
 	ParseWebhook(ctx context.Context, cfg jsonmap.JSON, headers map[string]string, body []byte, now time.Time) (*GatewayCallbackResult, error)
+}
+
+// GatewaySecurityTester 是支持非交易安全诊断的网关可选能力。
+type GatewaySecurityTester interface {
+	GatewayProvider
+	TestSecurity(ctx context.Context, cfg jsonmap.JSON) (*GatewaySecurityTestResult, error)
 }
 
 type GatewayCallbackVerifier interface {

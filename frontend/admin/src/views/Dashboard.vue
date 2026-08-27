@@ -41,6 +41,7 @@ interface DashboardOverview {
     processing_orders: number
     gmv_paid: string
     total_cost: string
+    payment_fee: string
     total_profit: string
     profit_margin: string
     payments_total: number
@@ -442,6 +443,7 @@ onMounted(() => {
         </CardHeader>
         <CardContent>
           <div class="text-2xl font-semibold">{{ formatMoney(overview?.kpi.total_cost, overview?.currency) }}</div>
+          <div class="mt-1 text-xs text-muted-foreground">{{ t('admin.dashboard.kpi.paymentFee') }}: {{ formatMoney(overview?.kpi.payment_fee, overview?.currency) }}</div>
         </CardContent>
       </Card>
 

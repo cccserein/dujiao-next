@@ -8,6 +8,8 @@ import { getImageUrl } from '@/utils/image'
 import { resolveOkpayConfiguredCoin } from '@/utils/paymentChannelDisplay'
 import IdCell from '@/components/IdCell.vue'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import TableSkeleton from '@/components/TableSkeleton.vue'
 import ListPagination from '@/components/ListPagination.vue'
@@ -16,6 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { confirmAction } from '@/utils/confirm'
 import PaymentChannelModal from './components/PaymentChannelModal.vue'
 import ComplianceGuardWrapper from '@/components/ComplianceGuardWrapper.vue'
+import { notifyError, notifySuccess } from '@/utils/notify'
 
 const loading = ref(true)
 const { refreshing, refreshList } = useListRefresh()
@@ -36,6 +39,38 @@ const route = useRoute()
 const showModal = ref(false)
 const editingId = ref<number | null>(null)
 const { t } = useI18n()
+const feeConfig = reactive({
+  customer_fee_enabled: false,
+  reuse_legacy_order_fee_payment: false,
+})
+const feeConfigSaving = ref(false)
+
+const loadFeeConfig = async () => {
+  try {
+    const response = await adminAPI.getSettings({ key: 'payment_config' })
+    const data = response.data?.data
+    feeConfig.customer_fee_enabled = data?.customer_fee_enabled === true
+    feeConfig.reuse_legacy_order_fee_payment = data?.reuse_legacy_order_fee_payment === true
+  } catch {
+    feeConfig.customer_fee_enabled = false
+    feeConfig.reuse_legacy_order_fee_payment = false
+  }
+}
+
+const saveFeeConfig = async () => {
+  feeConfigSaving.value = true
+  try {
+    await adminAPI.updateSettings({
+      key: 'payment_config',
+      value: { ...feeConfig },
+    } as any)
+    notifySuccess(t('admin.settings.saved'))
+  } catch (error: any) {
+    notifyError(error?.message || t('admin.settings.saveFailed'))
+  } finally {
+    feeConfigSaving.value = false
+  }
+}
 
 const fetchChannels = async (page = 1, options: ListFetchOptions = {}) => {
   if (!options.preserveRows) loading.value = true
@@ -230,6 +265,7 @@ const openEditById = async (rawId: unknown) => {
 
 onMounted(() => {
   fetchChannels()
+  loadFeeConfig()
   openEditById(route.query.channel_id)
 })
 
@@ -251,6 +287,34 @@ watch(
       <Button class="w-full gap-2 sm:w-auto" @click="openCreateModal">
         <span>{{ t('admin.paymentChannels.create') }}</span>
       </Button>
+    </div>
+
+    <div class="rounded-xl border border-border bg-card p-5 shadow-sm">
+      <div class="flex flex-col gap-5">
+        <div>
+          <h2 class="font-semibold text-foreground">{{ t('admin.paymentChannels.feePolicy.title') }}</h2>
+          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.paymentChannels.feePolicy.subtitle') }}</p>
+        </div>
+        <div class="flex items-start justify-between gap-4 border-t border-border pt-4">
+          <div>
+            <Label for="customer-fee-enabled">{{ t('admin.paymentChannels.feePolicy.customerFee') }}</Label>
+            <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.paymentChannels.feePolicy.customerFeeTip') }}</p>
+          </div>
+          <Switch id="customer-fee-enabled" v-model="feeConfig.customer_fee_enabled" />
+        </div>
+        <div class="flex items-start justify-between gap-4 border-t border-border pt-4">
+          <div>
+            <Label for="reuse-legacy-fee-payment">{{ t('admin.paymentChannels.feePolicy.reuseLegacy') }}</Label>
+            <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.paymentChannels.feePolicy.reuseLegacyTip') }}</p>
+          </div>
+          <Switch id="reuse-legacy-fee-payment" v-model="feeConfig.reuse_legacy_order_fee_payment" />
+        </div>
+        <div class="flex justify-end border-t border-border pt-4">
+          <Button :disabled="feeConfigSaving" @click="saveFeeConfig">
+            {{ feeConfigSaving ? t('admin.settings.actions.saving') : t('admin.settings.actions.save') }}
+          </Button>
+        </div>
+      </div>
     </div>
 
     <div class="rounded-xl border border-border bg-card p-4 shadow-sm">

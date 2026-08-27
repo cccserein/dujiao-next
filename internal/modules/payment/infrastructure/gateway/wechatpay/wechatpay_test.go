@@ -93,6 +93,7 @@ func TestValidateConfigInvalidAPIV3KeyLength(t *testing.T) {
 }
 
 func TestCreatePaymentH5Success(t *testing.T) {
+	wechatPayKey := newTestWechatPayKey(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method: %s", r.Method)
@@ -131,23 +132,26 @@ func TestCreatePaymentH5Success(t *testing.T) {
 		if h5Info["type"] != "WAP" {
 			t.Fatalf("unexpected h5 type: %v", h5Info["type"])
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"h5_url":"https://wx.tenpay.com/cgi-bin/mmpayweb-bin/checkmweb?prepay_id=wx123"}`))
+		writeSignedWechatPayResponse(t, w, wechatPayKey,
+			`{"h5_url":"https://wx.tenpay.com/cgi-bin/mmpayweb-bin/checkmweb?prepay_id=wx123"}`)
 	}))
 	defer server.Close()
 
 	cfg, err := ParseConfig(map[string]interface{}{
-		"appid":                "wx1234567890",
-		"mchid":                "1900000109",
-		"merchant_serial_no":   "ABC123456789",
-		"merchant_private_key": buildTestPrivateKey(),
-		"api_v3_key":           "12345678901234567890123456789012",
-		"notify_url":           "https://example.com/api/v1/payments/callback",
-		"h5_redirect_url":      "https://example.com/pay/result",
-		"h5_type":              "WAP",
-		"h5_wap_url":           "https://m.example.com",
-		"h5_wap_name":          "demo",
-		"base_url":             server.URL,
+		"appid":                   "wx1234567890",
+		"mchid":                   "1900000109",
+		"merchant_serial_no":      "ABC123456789",
+		"merchant_private_key":    buildTestPrivateKey(),
+		"api_v3_key":              "12345678901234567890123456789012",
+		"verification_mode":       verificationModeWechatPayPublicKey,
+		"wechatpay_public_key_id": wechatPayKey.id,
+		"wechatpay_public_key":    wechatPayKey.publicKeyPEM,
+		"notify_url":              "https://example.com/api/v1/payments/callback",
+		"h5_redirect_url":         "https://example.com/pay/result",
+		"h5_type":                 "WAP",
+		"h5_wap_url":              "https://m.example.com",
+		"h5_wap_name":             "demo",
+		"base_url":                server.URL,
 	})
 	if err != nil {
 		t.Fatalf("parse config failed: %v", err)
@@ -182,23 +186,27 @@ func TestCreatePaymentH5Success(t *testing.T) {
 }
 
 func TestCreatePaymentNativeSuccess(t *testing.T) {
+	wechatPayKey := newTestWechatPayKey(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v3/pay/transactions/native" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code_url":"weixin://wxpay/bizpayurl?pr=mocked"}`))
+		writeSignedWechatPayResponse(t, w, wechatPayKey,
+			`{"code_url":"weixin://wxpay/bizpayurl?pr=mocked"}`)
 	}))
 	defer server.Close()
 
 	cfg, err := ParseConfig(map[string]interface{}{
-		"appid":                "wx1234567890",
-		"mchid":                "1900000109",
-		"merchant_serial_no":   "ABC123456789",
-		"merchant_private_key": buildTestPrivateKey(),
-		"api_v3_key":           "12345678901234567890123456789012",
-		"notify_url":           "https://example.com/api/v1/payments/callback",
-		"base_url":             server.URL,
+		"appid":                   "wx1234567890",
+		"mchid":                   "1900000109",
+		"merchant_serial_no":      "ABC123456789",
+		"merchant_private_key":    buildTestPrivateKey(),
+		"api_v3_key":              "12345678901234567890123456789012",
+		"verification_mode":       verificationModeWechatPayPublicKey,
+		"wechatpay_public_key_id": wechatPayKey.id,
+		"wechatpay_public_key":    wechatPayKey.publicKeyPEM,
+		"notify_url":              "https://example.com/api/v1/payments/callback",
+		"base_url":                server.URL,
 	})
 	if err != nil {
 		t.Fatalf("parse config failed: %v", err)
@@ -223,6 +231,7 @@ func TestCreatePaymentNativeSuccess(t *testing.T) {
 }
 
 func TestCreatePaymentResponseInvalid(t *testing.T) {
+	wechatPayKey := newTestWechatPayKey(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -231,14 +240,17 @@ func TestCreatePaymentResponseInvalid(t *testing.T) {
 	defer server.Close()
 
 	cfg, err := ParseConfig(map[string]interface{}{
-		"appid":                "wx1234567890",
-		"mchid":                "1900000109",
-		"merchant_serial_no":   "ABC123456789",
-		"merchant_private_key": buildTestPrivateKey(),
-		"api_v3_key":           "12345678901234567890123456789012",
-		"notify_url":           "https://example.com/api/v1/payments/callback",
-		"h5_redirect_url":      "https://example.com/pay/result",
-		"base_url":             server.URL,
+		"appid":                   "wx1234567890",
+		"mchid":                   "1900000109",
+		"merchant_serial_no":      "ABC123456789",
+		"merchant_private_key":    buildTestPrivateKey(),
+		"api_v3_key":              "12345678901234567890123456789012",
+		"verification_mode":       verificationModeWechatPayPublicKey,
+		"wechatpay_public_key_id": wechatPayKey.id,
+		"wechatpay_public_key":    wechatPayKey.publicKeyPEM,
+		"notify_url":              "https://example.com/api/v1/payments/callback",
+		"h5_redirect_url":         "https://example.com/pay/result",
+		"base_url":                server.URL,
 	})
 	if err != nil {
 		t.Fatalf("parse config failed: %v", err)
@@ -257,6 +269,7 @@ func TestCreatePaymentResponseInvalid(t *testing.T) {
 }
 
 func TestQueryOrderByOutTradeNoSuccess(t *testing.T) {
+	wechatPayKey := newTestWechatPayKey(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("unexpected method: %s", r.Method)
@@ -267,26 +280,28 @@ func TestQueryOrderByOutTradeNoSuccess(t *testing.T) {
 		if r.URL.Query().Get("mchid") != "1900000109" {
 			t.Fatalf("unexpected mchid: %s", r.URL.Query().Get("mchid"))
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
+		writeSignedWechatPayResponse(t, w, wechatPayKey, `{
 			"out_trade_no":"ORDER-2001",
 			"transaction_id":"4200002001202602100000001",
 			"trade_state":"SUCCESS",
 			"success_time":"2026-02-10T10:00:00+08:00",
 			"amount":{"total":1234,"currency":"CNY"},
 			"attach":"1001"
-		}`))
+		}`)
 	}))
 	defer server.Close()
 
 	cfg, err := ParseConfig(map[string]interface{}{
-		"appid":                "wx1234567890",
-		"mchid":                "1900000109",
-		"merchant_serial_no":   "ABC123456789",
-		"merchant_private_key": buildTestPrivateKey(),
-		"api_v3_key":           "12345678901234567890123456789012",
-		"notify_url":           "https://example.com/api/v1/payments/callback",
-		"base_url":             server.URL,
+		"appid":                   "wx1234567890",
+		"mchid":                   "1900000109",
+		"merchant_serial_no":      "ABC123456789",
+		"merchant_private_key":    buildTestPrivateKey(),
+		"api_v3_key":              "12345678901234567890123456789012",
+		"verification_mode":       verificationModeWechatPayPublicKey,
+		"wechatpay_public_key_id": wechatPayKey.id,
+		"wechatpay_public_key":    wechatPayKey.publicKeyPEM,
+		"notify_url":              "https://example.com/api/v1/payments/callback",
+		"base_url":                server.URL,
 	})
 	if err != nil {
 		t.Fatalf("parse config failed: %v", err)
