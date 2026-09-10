@@ -89,7 +89,10 @@ func (s *PostStore) GetBySlug(ctx context.Context, slug string, onlyPublished bo
 
 func (s *PostStore) GetByID(ctx context.Context, id string) (*domain.Post, error) {
 	var post domain.Post
-	if err := withContext(s.db, ctx).Where("deleted_at IS NULL").First(&post, id).Error; err != nil {
+	if err := withContext(s.db, ctx).Where("deleted_at IS NULL").
+		// 安全加固：显式参数化主键，防 GORM First(&x, id) 非数字 string 注入。
+		Where("id = ?", id).
+		First(&post).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}

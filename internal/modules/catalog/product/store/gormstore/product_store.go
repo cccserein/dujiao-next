@@ -210,7 +210,11 @@ func (r *ProductStore) GetByID(id string) (*productdomain.Product, error) {
 			return db.Where("deleted_at IS NULL AND is_active = ?", true).Order("sort_order DESC, id ASC")
 		}).
 		Where("products.deleted_at IS NULL").
-		First(&product, id).Error; err != nil {
+		// 安全加固：显式参数化主键条件。GORM 的 First(&x, id) 在 id 为
+		// 非数字 string 时会当作原生 SQL 条件执行（SQL 注入向量），
+		// 这里用 Where("id = ?", ...) 让 GORM 始终绑定参数，杜绝注入。
+		Where("products.id = ?", id).
+		First(&product).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -227,7 +231,9 @@ func (r *ProductStore) GetAdminByID(id string) (*productdomain.Product, error) {
 			return db.Where("deleted_at IS NULL").Order("sort_order DESC, id ASC")
 		}).
 		Where("products.deleted_at IS NULL").
-		First(&product, id).Error; err != nil {
+		// 安全加固：同 GetByID，显式参数化主键条件防 SQL 注入。
+		Where("products.id = ?", id).
+		First(&product).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}

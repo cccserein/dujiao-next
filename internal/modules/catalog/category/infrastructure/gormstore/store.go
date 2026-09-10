@@ -45,7 +45,11 @@ func (r *CategoryStore) ListActive() ([]categorydomain.Category, error) {
 // GetByID 根据 ID 获取分类
 func (r *CategoryStore) GetByID(id string) (*categorydomain.Category, error) {
 	var category categorydomain.Category
-	if err := r.db.Where("deleted_at IS NULL").First(&category, id).Error; err != nil {
+	if err := r.db.Where("deleted_at IS NULL").
+		// 安全加固：显式参数化主键条件，防 GORM First(&x, id) 对非数字
+		// string 主键当原生 SQL 执行导致的 SQL 注入。
+		Where("id = ?", id).
+		First(&category).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
