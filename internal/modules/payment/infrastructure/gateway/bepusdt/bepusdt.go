@@ -2,6 +2,7 @@ package bepusdt
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -363,8 +364,11 @@ func VerifyCallback(cfg *Config, data *CallbackData) error {
 		"status":               data.Status,
 	}
 
+	if strings.TrimSpace(cfg.AuthToken) == "" {
+		return ErrConfigInvalid
+	}
 	expected := Sign(params, cfg.AuthToken)
-	if !strings.EqualFold(expected, data.Signature) {
+	if !hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(data.Signature))) {
 		return ErrSignatureInvalid
 	}
 	return nil

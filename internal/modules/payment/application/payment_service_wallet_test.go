@@ -1339,9 +1339,129 @@ func TestPaymentCoveredOrderAmount(t *testing.T) {
 				FeeAmount: money.FromDecimal(decimal.RequireFromString(tt.feeAmount)),
 				FeePolicy: tt.feePolicy,
 			}
-			if got := paymentCoveredOrderAmount(payment); got.String() != tt.want {
+			if got := paymentCoveredOrderAmount(payment, decimal.Zero); got.String() != tt.want {
 				t.Fatalf("paymentCoveredOrderAmount() = %s, want %s", got.String(), tt.want)
 			}
 		})
+	}
+}
+
+// TestPaymentCoveredOrderAmountWithExchangeRateFullPayment 验证换汇渠道（如 Stripe
+// 配置 target_currency=GBP、exchange_rate=0.11，订单 1 CNY 换算成 0.11 GBP 下单）
+// 足额支付时，按渠道汇率把回调金额折算回订单币种，能正确判定覆盖了订单应付额，
+// 不会拿 GBP 数值直接跟 CNY 总额硬比而误判为金额不足。
+func TestPaymentCoveredOrderAmountWithExchangeRateFullPayment(t *testing.T) {
+	payment := &paymentdomain.Payment{
+		Amount:    money.FromDecimal(decimal.RequireFromString("0.11")),
+		FeeAmount: money.FromDecimal(decimal.Zero),
+		FeePolicy: constants.PaymentFeePolicyNone,
+		Currency:  "GBP",
+		ProviderPayload: jsonmap.JSON{
+			"original_amount":   "1",
+			"original_currency": "CNY",
+			"exchange_rate":     "0.11",
+		},
+	}
+	callbackAmount := decimal.RequireFromString("0.11")
+	got := paymentCoveredOrderAmount(payment, callbackAmount)
+	want := decimal.RequireFromString("1")
+	if !got.Equal(want) {
+		t.Fatalf("paymentCoveredOrderAmount() = %s, want %s", got.String(), want.String())
+	}
+}
+
+// TestStripeExchangeRateFullPaymentFulfillsOrder 验证 Stripe 渠道配置了
+// target_currency=GBP、exchange_rate=0.11（订单 1 CNY 换算成 0.11 GBP 下单），webhook
+// 回调返回 GBP 原值 0.11 时，应按汇率折算回 1 CNY 判定为足额支付，而不是把 0.11 直接
+// 当 CNY 数值比较误判为欠款。
+func TestStripeExchangeRateFullPaymentFulfillsOrder(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	channel := createUnderpaidChannel(t, db, svc, "Stripe GBP", constants.PaymentChannelTypeStripe)
+	order := createUnderpaidOrder(t, db, "STRIPE_GBP_FULL", 1, 1)
+
+	now := time.Now()
+	payment := &paymentdomain.Payment{
+		OrderID: order.ID, ChannelID: channel.ID, ProviderType: channel.ProviderType, ChannelType: channel.ChannelType,
+		InteractionMode: channel.InteractionMode,
+		Amount:          money.FromDecimal(decimal.RequireFromString("0.11")),
+		FeeAmount:       money.FromDecimal(decimal.Zero), FeePolicy: constants.PaymentFeePolicyNone,
+		Currency: "GBP",
+		Status:   constants.PaymentStatusPending,
+		ProviderPayload: jsonmap.JSON{
+			"original_amount":   "1",
+			"original_currency": "CNY",
+			"exchange_rate":     "0.11",
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(payment).Error; err != nil {
+		t.Fatalf("create payment failed: %v", err)
+	}
+
+	paid, err := svc.HandleCallback(PaymentCallbackInput{
+		PaymentID: payment.ID, OrderNo: order.OrderNo, ChannelID: channel.ID,
+		Status: constants.PaymentStatusSuccess,
+		Amount: money.FromDecimal(decimal.RequireFromString("0.11")), Currency: "GBP",
+		ProviderRef: "stripe-gbp-full-ref",
+	})
+	if err != nil {
+		t.Fatalf("handle stripe gbp full payment callback failed: %v", err)
+	}
+	if paid.ExceptionCode != "" {
+		t.Fatalf("stripe gbp full payment should not be flagged, got exception_code=%s", paid.ExceptionCode)
+	}
+
+	var reloadedOrder orderdomain.Order
+	if err := db.First(&reloadedOrder, order.ID).Error; err != nil {
+		t.Fatalf("reload order failed: %v", err)
+	}
+	if reloadedOrder.Status != constants.OrderStatusPaid || reloadedOrder.PaidAt == nil {
+		t.Fatalf("stripe gbp full payment must fulfill the order, got status=%s paid_at=%v", reloadedOrder.Status, reloadedOrder.PaidAt)
+	}
+}
+
+// TestStripeExchangeRateUnderpaidCallbackRejected 验证 Stripe GBP 换汇场景（订单 1
+// CNY，应收 0.11 GBP，实际回调只有 0.05 GBP）被 validateCallbackPaymentFacts 精确
+// 匹配直接拒绝——法币网关同样不允许少付，回调金额必须精确等于创建时的 payment.Amount。
+func TestStripeExchangeRateUnderpaidCallbackRejected(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	channel := createUnderpaidChannel(t, db, svc, "Stripe GBP Underpaid", constants.PaymentChannelTypeStripe)
+	order := createUnderpaidOrder(t, db, "STRIPE_GBP_UNDERPAID", 1, 1)
+
+	now := time.Now()
+	payment := &paymentdomain.Payment{
+		OrderID: order.ID, ChannelID: channel.ID, ProviderType: channel.ProviderType, ChannelType: channel.ChannelType,
+		InteractionMode: channel.InteractionMode,
+		Amount:          money.FromDecimal(decimal.RequireFromString("0.11")),
+		FeeAmount:       money.FromDecimal(decimal.Zero), FeePolicy: constants.PaymentFeePolicyNone,
+		Currency: "GBP",
+		Status:   constants.PaymentStatusPending,
+		ProviderPayload: jsonmap.JSON{
+			"original_amount":   "1",
+			"original_currency": "CNY",
+			"exchange_rate":     "0.11",
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(payment).Error; err != nil {
+		t.Fatalf("create payment failed: %v", err)
+	}
+
+	_, err := svc.HandleCallback(PaymentCallbackInput{
+		PaymentID: payment.ID, OrderNo: order.OrderNo, ChannelID: channel.ID,
+		Status: constants.PaymentStatusSuccess,
+		Amount: money.FromDecimal(decimal.RequireFromString("0.05")), Currency: "GBP",
+		ProviderRef: "stripe-gbp-underpaid-ref",
+	})
+	if err != ErrPaymentAmountMismatch {
+		t.Fatalf("stripe gbp underpaid callback should be rejected with ErrPaymentAmountMismatch, got: %v", err)
+	}
+
+	var reloadedOrder orderdomain.Order
+	if err := db.First(&reloadedOrder, order.ID).Error; err != nil {
+		t.Fatalf("reload order failed: %v", err)
+	}
+	if reloadedOrder.Status != constants.OrderStatusPendingPayment || reloadedOrder.PaidAt != nil {
+		t.Fatalf("rejected stripe gbp payment must not fulfill order, got status=%s paid_at=%v", reloadedOrder.Status, reloadedOrder.PaidAt)
 	}
 }

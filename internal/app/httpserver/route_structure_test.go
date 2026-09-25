@@ -59,7 +59,7 @@ func TestRouteDomainFilesPreserveTrustBoundaries(t *testing.T) {
 				`resellertransport.RegisterUserOrderRoutes(resellerConsole, userResellerOrderHandler)`,
 				`apicredentialtransport.RegisterUserRoutes(user, userApiCredentialHandler)`,
 				`auditlogtransport.RegisterUserRoutes(user, userAuditLogHandler)`,
-				`giftcardtransport.RegisterUserRoutes(user, userGiftCardHandler)`,
+				`giftcardtransport.RegisterUserRoutes(giftCardRedeem, userGiftCardHandler)`,
 				`wallettransport.RegisterUserRoutes(user, userWalletHandler)`,
 				`userauthtransport.RegisterUserProfileRoutes(user, userProfileHandler)`,
 				`userauthtransport.RegisterUserEmailRoutes(user, userEmailHandler)`,
@@ -96,7 +96,7 @@ func TestRouteDomainFilesPreserveTrustBoundaries(t *testing.T) {
 				`paymenttransport.RegisterGuestLatestRoute(guestRead, paymentLatestHandler)`,
 				`paymenttransport.RegisterUserWriteRoutes(user, paymentWriteHandler)`,
 				`paymenttransport.RegisterUserLatestRoute(user, paymentLatestHandler)`,
-				`paymenttransport.RegisterWebhookRoutes(apiV1, webhookHandler)`,
+				`paymenttransport.RegisterWebhookRoutes(callbacks, webhookHandler)`,
 			},
 		},
 		{

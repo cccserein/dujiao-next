@@ -70,3 +70,15 @@ func quotedStatusList(statuses []string) string {
 	}
 	return strings.Join(parts, ",")
 }
+
+// timeRangeQuery 返回时间范围查询的 WHERE 条件和参数
+// 在 SQLite 下使用 datetime() 函数确保格式一致，避免字符串比较错误
+func timeRangeQuery(db *gorm.DB, column string, startAt, endAt time.Time) (string, []interface{}) {
+	switch dialectName(db) {
+	case "postgres", "postgresql":
+		return fmt.Sprintf("%s >= ? AND %s < ?", column, column), []interface{}{startAt, endAt}
+	default:
+		// SQLite: 使用 datetime() 函数确保时间比较正确
+		return fmt.Sprintf("datetime(%s) >= datetime(?) AND datetime(%s) < datetime(?)", column, column), []interface{}{startAt.Format(time.RFC3339Nano), endAt.Format(time.RFC3339Nano)}
+	}
+}

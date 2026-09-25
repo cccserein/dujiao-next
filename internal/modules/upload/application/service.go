@@ -1,7 +1,9 @@
 package application
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/xml"
 	"fmt"
 	"image"
 	"io"
@@ -239,37 +241,57 @@ func isSVGContent(buf []byte) bool {
 		strings.Contains(content, "<svg")
 }
 
-// validateSVGSafety 检查 SVG 内容安全性，禁止脚本和危险元素
+// validateSVGSafety 用 XML 解析器逐 token 检查 SVG，禁止脚本、事件属性、危险元素与协议。
+// 用解析器而非字符串匹配：`onload<Tab>=`、换行、实体编码等写法在浏览器里都会生效，正则黑名单无法穷举。
 func validateSVGSafety(data []byte) error {
-	content := strings.ToLower(string(data))
-	// 禁止脚本标签
-	if strings.Contains(content, "<script") {
-		return fmt.Errorf("SVG 文件不允许包含 <script> 标签")
-	}
-	// 禁止事件处理属性（onclick, onload, onerror 等）
-	dangerousAttrs := []string{
-		"onload", "onclick", "onerror", "onmouseover", "onmouseout",
-		"onmousemove", "onfocus", "onblur", "onchange", "onsubmit",
-		"onanimationstart", "onanimationend", "onanimationiteration",
-	}
-	for _, attr := range dangerousAttrs {
-		if strings.Contains(content, attr+"=") || strings.Contains(content, attr+" =") {
-			return fmt.Errorf("SVG 文件不允许包含事件处理属性: %s", attr)
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	dec.Strict = true // 浏览器把 SVG 当 XML 解析，格式错误同样拒绝，二者行为一致
+	for {
+		tok, err := dec.RawToken()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("SVG 文件解析失败: %v", err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			name := strings.ToLower(t.Name.Local)
+			if name == "script" {
+				return fmt.Errorf("SVG 文件不允许包含 <script> 标签")
+			}
+			if name == "foreignobject" {
+				return fmt.Errorf("SVG 文件不允许包含 <foreignObject> 元素")
+			}
+			for _, attr := range t.Attr {
+				aname := strings.ToLower(attr.Name.Local)
+				if strings.HasPrefix(aname, "on") {
+					return fmt.Errorf("SVG 文件不允许包含事件处理属性: %s", aname)
+				}
+				val := strings.ToLower(strings.TrimSpace(attr.Value))
+				val = strings.Map(func(r rune) rune { // 去掉控制/空白字符，浏览器解析 URL 时会忽略它们
+					if r <= ' ' {
+						return -1
+					}
+					return r
+				}, val)
+				if strings.HasPrefix(val, "javascript:") {
+					return fmt.Errorf("SVG 文件不允许包含 javascript: 协议")
+				}
+				if strings.HasPrefix(val, "data:text/html") || strings.HasPrefix(val, "data:application") || strings.HasPrefix(val, "data:image/svg") {
+					return fmt.Errorf("SVG 文件不允许包含危险的 data: URI")
+				}
+			}
+		case xml.ProcInst:
+			if strings.ToLower(t.Target) != "xml" {
+				return fmt.Errorf("SVG 文件不允许包含处理指令: %s", t.Target)
+			}
+		case xml.Directive:
+			if strings.Contains(strings.ToLower(string(t)), "<!entity") {
+				return fmt.Errorf("SVG 文件不允许声明实体")
+			}
 		}
 	}
-	// 禁止 javascript: 协议
-	if strings.Contains(content, "javascript:") {
-		return fmt.Errorf("SVG 文件不允许包含 javascript: 协议")
-	}
-	// 禁止 data: URI（可用于绕过 CSP）
-	if strings.Contains(content, "data:text/html") || strings.Contains(content, "data:application") {
-		return fmt.Errorf("SVG 文件不允许包含危险的 data: URI")
-	}
-	// 禁止 foreignObject（可嵌入 HTML）
-	if strings.Contains(content, "<foreignobject") {
-		return fmt.Errorf("SVG 文件不允许包含 <foreignObject> 元素")
-	}
-	return nil
 }
 
 func decodeWebPDimensions(src io.ReadSeeker) (int, int, error) {

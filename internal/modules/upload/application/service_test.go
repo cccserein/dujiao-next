@@ -179,6 +179,16 @@ func TestValidateSVGSafety(t *testing.T) {
 		{"javascript href", `<svg><a href="javascript:void(0)"></a></svg>`, true},
 		{"data uri html", `<svg><image href="data:text/html,<h1>hi</h1>"/></svg>`, true},
 		{"foreignObject", `<svg><foreignObject></foreignObject></svg>`, true},
+		{"onload tab before equals", "<svg xmlns=\"http://www.w3.org/2000/svg\" onload\t=\"alert(1)\"></svg>", true},
+		{"onload newline before equals", "<svg onload\n=\"alert(1)\"></svg>", true},
+		{"onload double space", `<svg onload  ="alert(1)"></svg>`, true},
+		{"unlisted event attr onbegin", `<svg><set attributeName="x" onbegin="alert(1)"/></svg>`, true},
+		{"entity encoded javascript", `<svg><a href="&#106;avascript:alert(1)"></a></svg>`, true},
+		{"xlink href javascript", `<svg xmlns:xlink="http://www.w3.org/1999/xlink"><a xlink:href="javascript:alert(1)"></a></svg>`, true},
+		{"xml-stylesheet pi", `<?xml-stylesheet href="http://evil/x.css"?><svg></svg>`, true},
+		{"entity declaration", `<!DOCTYPE svg [<!ENTITY x "y">]><svg>&x;</svg>`, true},
+		{"malformed xml", `<svg onload="alert(1)"`, true},
+		{"safe with doctype and style", `<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg xmlns="http://www.w3.org/2000/svg"><style>.a{fill:red}</style><rect class="a" width="10" height="10"/></svg>`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

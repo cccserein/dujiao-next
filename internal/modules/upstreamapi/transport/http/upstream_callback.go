@@ -71,7 +71,7 @@ func (h *Handler) HandleCallback(c *gin.Context) {
 	// 读取 body 用于签名验证
 	var body []byte
 	if c.Request.Body != nil {
-		body, err = io.ReadAll(c.Request.Body)
+		body, err = io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{"ok": false, "message": "failed to read request body"})
 			return
@@ -79,12 +79,16 @@ func (h *Handler) HandleCallback(c *gin.Context) {
 		c.Request.Body = io.NopCloser(&bodyBuf{data: body})
 	}
 
-	// 解密 api_secret 并验证签名
+	// 解密 api_secret 并验证签名；解密失败视为配置错误，直接拒绝
 	apiSecret := conn.ApiSecret
 	if h.ConnectionSecrets != nil {
-		if decrypted, decErr := h.ConnectionSecrets.DecryptSecret(apiSecret); decErr == nil {
-			apiSecret = decrypted
+		decrypted, decErr := h.ConnectionSecrets.DecryptSecret(apiSecret)
+		if decErr != nil {
+			logger.Errorw("upstream_callback_secret_decrypt_failed", "connection_id", conn.ID, "error", decErr)
+			c.JSON(http.StatusOK, gin.H{"ok": false, "message": "internal error"})
+			return
 		}
+		apiSecret = decrypted
 	}
 
 	if !upstreamadapter.Verify(apiSecret, "POST", "/api/v1/upstream/callback", signature, timestamp, body) {
@@ -116,6 +120,23 @@ func (h *Handler) HandleCallback(c *gin.Context) {
 		logger.Warnw("upstream_callback_procurement_not_found",
 			"downstream_order_no", payload.DownstreamOrderNo,
 			"upstream_order_id", payload.OrderID,
+		)
+		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "procurement order not found"})
+		return
+	}
+
+	// 归属校验：采购单必须属于本次认证的连接，且上游订单号需与登记值一致，
+	// 防止任意已认证连接凭本地订单号提交他人订单的状态。
+	// upstream_order_id 为 0 时说明下单响应尚未落库（回调抢跑），此时只校验连接归属。
+	if procOrder.ConnectionID != conn.ID ||
+		(procOrder.UpstreamOrderID != 0 && payload.OrderID != procOrder.UpstreamOrderID) {
+		logger.Warnw("upstream_callback_ownership_mismatch",
+			"api_key", apiKey,
+			"connection_id", conn.ID,
+			"procurement_connection_id", procOrder.ConnectionID,
+			"downstream_order_no", payload.DownstreamOrderNo,
+			"payload_order_id", payload.OrderID,
+			"procurement_upstream_order_id", procOrder.UpstreamOrderID,
 		)
 		c.JSON(http.StatusOK, gin.H{"ok": false, "message": "procurement order not found"})
 		return

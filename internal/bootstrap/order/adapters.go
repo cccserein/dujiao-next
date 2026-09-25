@@ -504,6 +504,7 @@ func mapOrderTransportError(err error) error {
 		{orderapp.ErrInvalidOrderAmount, ordertransport.ErrInvalidOrderAmount},
 		{orderapp.ErrGuestEmailRequired, ordertransport.ErrGuestEmailRequired},
 		{orderapp.ErrGuestPasswordRequired, ordertransport.ErrGuestPasswordRequired},
+		{orderapp.ErrGuestPasswordTooShort, ordertransport.ErrGuestPasswordTooShort},
 		{orderapp.ErrInvalidEmail, ordertransport.ErrInvalidEmail},
 		{orderapp.ErrProductPurchaseNotAllowed, ordertransport.ErrProductPurchaseNotAllowed},
 		{orderapp.ErrManualStockInsufficient, ordertransport.ErrManualStockInsufficient},

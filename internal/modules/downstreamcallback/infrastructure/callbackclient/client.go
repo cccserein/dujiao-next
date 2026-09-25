@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	downstreamcontract "github.com/dujiao-next/internal/modules/downstreamcallback/contract"
 	"github.com/dujiao-next/internal/upstream"
@@ -24,7 +23,7 @@ type Client struct {
 var _ downstreamcontract.Deliverer = (*Client)(nil)
 
 func New() *Client {
-	return NewWithHTTPClient(&http.Client{Timeout: 15 * time.Second})
+	return NewWithHTTPClient(newSafeHTTPClient())
 }
 
 func NewWithHTTPClient(client *http.Client) *Client {

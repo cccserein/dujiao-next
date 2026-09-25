@@ -64,7 +64,7 @@ func TestProcurementUsesCompleteVerticalLayout(t *testing.T) {
 			"rollbackLocalOrderOnProcurementFailure", "notifyProcurementFailure", "handleSubmitFailure",
 			"isRetryableErrorCode", "parseRetryIntervals",
 		},
-		"callback.go": {"HandleUpstreamCallback", "createUpstreamFulfillment"},
+		"callback.go": {"HandleUpstreamCallback", "createUpstreamFulfillment", "isUpstreamTransitionAllowed"},
 		"poll.go":     {"PollUpstreamStatus", "requeuePoll", "SyncAcceptedOrders", "mapProcurementUpstreamStatus"},
 		"query.go": {
 			"GetByID", "GetByLocalOrderNo", "List", "StatsByStatus", "FillParentOrderNo", "fillParentOrderNos",

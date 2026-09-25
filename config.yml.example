@@ -99,14 +99,14 @@ upload:
     - image/png
     - image/gif
     - image/webp
-    - image/svg+xml
+    # - image/svg+xml  # SVG 可携带脚本，默认关闭；如需开启请同时放开下方 .svg 扩展名
   allowed_extensions:
     - .jpg
     - .jpeg
     - .png
     - .gif
     - .webp
-    - .svg
+    # - .svg
   max_width: 4096
   max_height: 4096
 

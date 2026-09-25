@@ -20,6 +20,7 @@ type GatewayCreateInput struct {
 	Subject        string
 	Amount         money.Amount
 	Currency       string
+	Email          string
 	NotifyURL      string
 	ReturnURL      string
 	ReturnURLQuery map[string]string

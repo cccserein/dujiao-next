@@ -1,5 +1,61 @@
 <template>
   <div class="grid gap-[18px]">
+    <!-- 子订单（含卡密） -->
+    <section v-if="order.children && order.children.length > 0" class="rounded-xl border bg-card p-[22px]">
+      <h2 class="mb-4 text-lg font-bold">{{ t('orderDetail.childOrdersTitle') }}</h2>
+      <div class="grid gap-4">
+        <div v-for="child in order.children" :key="child.id" class="rounded-lg border p-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div class="text-[13px] text-muted-foreground">{{ t('orderDetail.childOrderNo') }}：{{ child.order_no }}</div>
+              <div class="text-[13px] text-muted-foreground">{{ t('orderDetail.childOrderAmount') }}：{{ formatMoney(child.total_amount, child.currency || order.currency) }}</div>
+            </div>
+            <Badge :variant="statusVariant(resolvedChildStatus(child))" size="sm" class="rounded-full">{{ statusLabel(resolvedChildStatus(child)) }}</Badge>
+          </div>
+
+          <h3 class="my-2.5 mt-4 text-sm font-bold">{{ t('orderDetail.childItemsTitle') }}</h3>
+          <div v-if="child.items && child.items.length" class="grid">
+            <VaultOrderItem v-for="(item, cidx) in child.items" :key="cidx" :item="item" :currency="child.currency || order.currency" />
+          </div>
+          <div v-else class="text-[13px] text-muted-foreground">{{ t('orderDetail.noItems') }}</div>
+
+          <div class="mt-3.5 border-t pt-3.5">
+            <VaultOrderFulfillment
+              v-if="child.fulfillment"
+              :title="t('orderDetail.childFulfillmentTitle')"
+              :fulfillment="child.fulfillment"
+              :items="child.items"
+              :order-no="child.order_no || order.order_no"
+              :downloading="fulfillmentDownloading"
+              @download="emit('download', $event)"
+            />
+            <div v-else class="text-[13px] text-muted-foreground">{{ t('orderDetail.childFulfillmentEmpty') }}</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 主订单发货（含卡密） -->
+    <section v-if="order.fulfillment" class="rounded-xl border bg-card p-[22px]">
+      <h2 class="mb-4 text-lg font-bold">{{ t('orderDetail.fulfillmentTitle') }}</h2>
+      <VaultOrderFulfillment
+        :fulfillment="order.fulfillment"
+        :items="order.items"
+        :order-no="order.order_no"
+        :downloading="fulfillmentDownloading"
+        @download="emit('download', $event)"
+      />
+    </section>
+
+    <!-- 商品 -->
+    <section class="rounded-xl border bg-card p-[22px]">
+      <h2 class="mb-4 text-lg font-bold">{{ t('orderDetail.itemsTitle') }}</h2>
+      <div v-if="order.items && order.items.length > 0" class="grid">
+        <VaultOrderItem v-for="(item, idx) in order.items" :key="idx" :item="item" :currency="order.currency" />
+      </div>
+      <div v-else class="text-[13px] text-muted-foreground">{{ t('orderDetail.noItems') }}</div>
+    </section>
+
     <!-- 金额明细 -->
     <section class="rounded-xl border bg-card p-[22px]">
       <h2 class="mb-4 text-lg font-bold">{{ t('orderDetail.amountTitle') }}</h2>
@@ -80,62 +136,6 @@
           <div class="mt-1.5 font-bold">{{ formatDate(order.canceled_at) }}</div>
         </div>
       </div>
-    </section>
-
-    <!-- 商品 -->
-    <section class="rounded-xl border bg-card p-[22px]">
-      <h2 class="mb-4 text-lg font-bold">{{ t('orderDetail.itemsTitle') }}</h2>
-      <div v-if="order.items && order.items.length > 0" class="grid">
-        <VaultOrderItem v-for="(item, idx) in order.items" :key="idx" :item="item" :currency="order.currency" />
-      </div>
-      <div v-else class="text-[13px] text-muted-foreground">{{ t('orderDetail.noItems') }}</div>
-    </section>
-
-    <!-- 子订单 -->
-    <section v-if="order.children && order.children.length > 0" class="rounded-xl border bg-card p-[22px]">
-      <h2 class="mb-4 text-lg font-bold">{{ t('orderDetail.childOrdersTitle') }}</h2>
-      <div class="grid gap-4">
-        <div v-for="child in order.children" :key="child.id" class="rounded-lg border p-4">
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div class="text-[13px] text-muted-foreground">{{ t('orderDetail.childOrderNo') }}：{{ child.order_no }}</div>
-              <div class="text-[13px] text-muted-foreground">{{ t('orderDetail.childOrderAmount') }}：{{ formatMoney(child.total_amount, child.currency || order.currency) }}</div>
-            </div>
-            <Badge :variant="statusVariant(resolvedChildStatus(child))" size="sm" class="rounded-full">{{ statusLabel(resolvedChildStatus(child)) }}</Badge>
-          </div>
-
-          <h3 class="my-2.5 mt-4 text-sm font-bold">{{ t('orderDetail.childItemsTitle') }}</h3>
-          <div v-if="child.items && child.items.length" class="grid">
-            <VaultOrderItem v-for="(item, cidx) in child.items" :key="cidx" :item="item" :currency="child.currency || order.currency" />
-          </div>
-          <div v-else class="text-[13px] text-muted-foreground">{{ t('orderDetail.noItems') }}</div>
-
-          <div class="mt-3.5 border-t pt-3.5">
-            <VaultOrderFulfillment
-              v-if="child.fulfillment"
-              :title="t('orderDetail.childFulfillmentTitle')"
-              :fulfillment="child.fulfillment"
-              :items="child.items"
-              :order-no="child.order_no || order.order_no"
-              :downloading="fulfillmentDownloading"
-              @download="emit('download', $event)"
-            />
-            <div v-else class="text-[13px] text-muted-foreground">{{ t('orderDetail.childFulfillmentEmpty') }}</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 主订单发货 -->
-    <section v-if="order.fulfillment" class="rounded-xl border bg-card p-[22px]">
-      <h2 class="mb-4 text-lg font-bold">{{ t('orderDetail.fulfillmentTitle') }}</h2>
-      <VaultOrderFulfillment
-        :fulfillment="order.fulfillment"
-        :items="order.items"
-        :order-no="order.order_no"
-        :downloading="fulfillmentDownloading"
-        @download="emit('download', $event)"
-      />
     </section>
   </div>
 </template>

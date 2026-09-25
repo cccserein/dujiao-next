@@ -76,6 +76,13 @@ func (r *Store) Update(cred *apicredentialdomain.ApiCredential) error {
 	return r.db.Save(cred).Error
 }
 
+// TouchLastUsedAt 只更新 last_used_at 单列，不覆盖其它字段。
+func (r *Store) TouchLastUsedAt(id uint, at time.Time) error {
+	return r.db.Model(&apicredentialdomain.ApiCredential{}).
+		Where("id = ? AND deleted_at IS NULL", id).
+		UpdateColumn("last_used_at", at).Error
+}
+
 // UpdateAny 更新凭证，包含软删除记录。
 func (r *Store) UpdateAny(cred *apicredentialdomain.ApiCredential) error {
 	return r.db.Save(cred).Error

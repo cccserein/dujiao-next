@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"github.com/dujiao-next/internal/telegramidentity"
 	"math/big"
 	"net/mail"
 	"strings"
@@ -263,7 +264,7 @@ func (s *Service) Register(email, password, code string, agreementAccepted bool,
 	if !agreementAccepted {
 		return nil, "", time.Time{}, ErrAgreementRequired
 	}
-	normalized, err := normalizeEmail(email)
+	normalized, err := normalizeUserSuppliedEmail(email)
 	if err != nil {
 		return nil, "", time.Time{}, err
 	}
@@ -560,6 +561,19 @@ func normalizeEmail(email string) (string, error) {
 		return "", ErrInvalidEmail
 	}
 	if _, err := mail.ParseAddress(normalized); err != nil {
+		return "", ErrInvalidEmail
+	}
+	return normalized, nil
+}
+
+// normalizeUserSuppliedEmail 用于注册 / 换绑等用户自填邮箱的入口，
+// Telegram 占位邮箱仅由系统生成，不接受用户填写。
+func normalizeUserSuppliedEmail(email string) (string, error) {
+	normalized, err := normalizeEmail(email)
+	if err != nil {
+		return "", err
+	}
+	if telegramidentity.IsPlaceholderEmail(normalized) {
 		return "", ErrInvalidEmail
 	}
 	return normalized, nil

@@ -1,6 +1,10 @@
 package contract
 
-import apicredentialdomain "github.com/dujiao-next/internal/modules/apicredential/domain"
+import (
+	"time"
+
+	apicredentialdomain "github.com/dujiao-next/internal/modules/apicredential/domain"
+)
 
 type ListFilter struct {
 	Status   string
@@ -17,6 +21,7 @@ type Repository interface {
 	GetByApiKey(apiKey string) (*apicredentialdomain.ApiCredential, error)
 	Create(credential *apicredentialdomain.ApiCredential) error
 	Update(credential *apicredentialdomain.ApiCredential) error
+	TouchLastUsedAt(id uint, at time.Time) error
 	UpdateAny(credential *apicredentialdomain.ApiCredential) error
 	Delete(id uint) error
 	List(filter ListFilter) ([]apicredentialdomain.ApiCredential, int64, error)

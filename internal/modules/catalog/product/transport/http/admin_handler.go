@@ -23,7 +23,7 @@ import (
 
 // ProductQueries 是后台商品列表/详情读取所需的最小用例接口。
 type ProductQueries interface {
-	ListAdmin(categoryID, search, fulfillmentType, stockStatus string, hasWholesalePrices *bool, lowStockThreshold int, page, pageSize int) ([]productdomain.Product, int64, error)
+	ListAdmin(categoryID, search, fulfillmentType, stockStatus string, hasWholesalePrices, isActive *bool, lowStockThreshold int, page, pageSize int) ([]productdomain.Product, int64, error)
 	GetAdminByID(id string) (*productdomain.Product, error)
 	ApplyAutoStockCounts(products []productdomain.Product) error
 }
@@ -98,24 +98,31 @@ func (h *AdminProductHandler) GetAdminProducts(c *gin.Context) {
 	if stockStatus == "" {
 		stockStatus = c.Query("stock_staus")
 	}
-	hasWholesalePrices, err := parseWholesaleFilter(c.Query("wholesale"))
+	hasWholesalePrices, err := parseTriStateBoolFilter(c.Query("wholesale"))
 	if err != nil {
 		ginutil.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
 	if hasWholesalePrices == nil {
-		hasWholesalePrices, err = parseWholesaleFilter(c.Query("has_wholesale_prices"))
+		hasWholesalePrices, err = parseTriStateBoolFilter(c.Query("has_wholesale_prices"))
 		if err != nil {
 			ginutil.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 			return
 		}
+	}
+	// 三态上架筛选：?is_active=1 仅已上架，?is_active=0 仅已下架，缺省/ all 不限。
+	// 与 search / category_id / stock_status / wholesale 之间是 AND 关系，可任意组合。
+	isActive, err := parseTriStateBoolFilter(c.Query("is_active"))
+	if err != nil {
+		ginutil.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
 	}
 
 	lowStockThreshold := 0
 	if h.settings != nil {
 		lowStockThreshold = h.settings.GetDashboardLowStockThreshold()
 	}
-	products, total, err := h.products.ListAdmin(categoryID, search, fulfillmentType, stockStatus, hasWholesalePrices, lowStockThreshold, page, pageSize)
+	products, total, err := h.products.ListAdmin(categoryID, search, fulfillmentType, stockStatus, hasWholesalePrices, isActive, lowStockThreshold, page, pageSize)
 	if err != nil {
 		ginutil.RespondError(c, response.CodeInternal, "error.product_fetch_failed", err)
 		return
@@ -132,7 +139,7 @@ func (h *AdminProductHandler) GetAdminProducts(c *gin.Context) {
 	response.SuccessWithPage(c, products, pagination)
 }
 
-func parseWholesaleFilter(raw string) (*bool, error) {
+func parseTriStateBoolFilter(raw string) (*bool, error) {
 	value := strings.ToLower(strings.TrimSpace(raw))
 	switch value {
 	case "", "all":

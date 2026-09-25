@@ -249,8 +249,8 @@ func (s *OrderService) CreateGuestOrder(input CreateGuestOrderInput) (*orderdoma
 		return nil, err
 	}
 	password := strings.TrimSpace(input.OrderPassword)
-	if password == "" {
-		return nil, ErrGuestPasswordRequired
+	if err := validateGuestPassword(password); err != nil {
+		return nil, err
 	}
 	locale := strings.TrimSpace(input.Locale)
 	return s.createOrder(orderCreateParams{
@@ -490,8 +490,10 @@ func (s *OrderService) createOrder(input orderCreateParams) (*orderdomain.Order,
 	if input.IsGuest && input.GuestEmail == "" {
 		return nil, ErrGuestEmailRequired
 	}
-	if input.IsGuest && input.GuestPassword == "" {
-		return nil, ErrGuestPasswordRequired
+	if input.IsGuest {
+		if err := validateGuestPassword(input.GuestPassword); err != nil {
+			return nil, err
+		}
 	}
 
 	expireMinutes := s.resolveExpireMinutes()
@@ -789,4 +791,18 @@ func buildRiskCheckInput(input orderCreateParams, consumeRateLimit bool) orderri
 
 func generateOrderNo() string {
 	return serial.Generate("DJ")
+}
+
+// guestPasswordMinLength 游客订单密码最小长度
+const guestPasswordMinLength = 6
+
+func validateGuestPassword(password string) error {
+	password = strings.TrimSpace(password)
+	if password == "" {
+		return ErrGuestPasswordRequired
+	}
+	if len([]rune(password)) < guestPasswordMinLength {
+		return ErrGuestPasswordTooShort
+	}
+	return nil
 }

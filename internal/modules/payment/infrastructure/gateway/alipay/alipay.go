@@ -238,9 +238,10 @@ func VerifyCallback(cfg *Config, form map[string][]string) error {
 	if sign == "" {
 		return fmt.Errorf("%w: sign is required", ErrSignatureInvalid)
 	}
-	signType := strings.ToUpper(strings.TrimSpace(firstFormValue(form, "sign_type")))
+	// sign_type 只取渠道配置
+	signType := strings.ToUpper(strings.TrimSpace(cfg.SignType))
 	if signType == "" {
-		signType = strings.ToUpper(strings.TrimSpace(cfg.SignType))
+		signType = alipaySignTypeRSA2
 	}
 	if signType != alipaySignTypeRSA2 && signType != alipaySignTypeRSA {
 		return fmt.Errorf("%w: sign_type is invalid", ErrSignatureInvalid)

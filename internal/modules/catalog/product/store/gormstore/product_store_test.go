@@ -580,3 +580,131 @@ func TestProductRepositoryListFiltersWholesalePrices(t *testing.T) {
 		t.Fatalf("product without wholesale missing: %+v", rows)
 	}
 }
+
+func createActiveStateProduct(t *testing.T, repo *ProductStore, slug string, title string, isActive bool, wholesale bool) *productdomain.Product {
+	t.Helper()
+	product := &productdomain.Product{
+		CategoryID:       1,
+		Slug:             slug,
+		TitleJSON:        jsonmap.JSON{"zh-CN": title},
+		PriceAmount:      money.FromDecimal(decimal.NewFromInt(100)),
+		PurchaseType:     constants.ProductPurchaseMember,
+		FulfillmentType:  constants.FulfillmentTypeManual,
+		ManualStockTotal: 10,
+		IsActive:         isActive,
+	}
+	if wholesale {
+		product.WholesalePrices = productdomain.WholesalePriceTiers{{MinQuantity: 5, UnitPrice: money.FromDecimal(decimal.NewFromInt(80))}}
+	}
+	if err := repo.Create(product); err != nil {
+		t.Fatalf("create product %s failed: %v", slug, err)
+	}
+	return product
+}
+
+func listSlugs(t *testing.T, repo *ProductStore, filter productcontract.ListFilter) map[string]bool {
+	t.Helper()
+	if filter.Page == 0 {
+		filter.Page = 1
+	}
+	if filter.PageSize == 0 {
+		filter.PageSize = 50
+	}
+	rows, _, err := repo.List(filter)
+	if err != nil {
+		t.Fatalf("list products failed: %v", err)
+	}
+	got := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		got[row.Slug] = true
+	}
+	return got
+}
+
+// 上架状态筛选是三态的：nil 不限、true 仅已上架、false 仅已下架。
+func TestProductRepositoryListFiltersActiveState(t *testing.T) {
+	repo, _ := setupProductStoreTest(t)
+
+	active := createActiveStateProduct(t, repo, "state-active", "上架商品", true, false)
+	inactive := createActiveStateProduct(t, repo, "state-inactive", "下架商品", false, false)
+
+	onlyActive := true
+	got := listSlugs(t, repo, productcontract.ListFilter{IsActive: &onlyActive})
+	if !got[active.Slug] || got[inactive.Slug] {
+		t.Fatalf("IsActive=true should return only the active product, got %+v", got)
+	}
+
+	onlyInactive := false
+	got = listSlugs(t, repo, productcontract.ListFilter{IsActive: &onlyInactive})
+	if !got[inactive.Slug] || got[active.Slug] {
+		t.Fatalf("IsActive=false should return only the inactive product, got %+v", got)
+	}
+
+	got = listSlugs(t, repo, productcontract.ListFilter{})
+	if !got[active.Slug] || !got[inactive.Slug] {
+		t.Fatalf("IsActive=nil should return both products, got %+v", got)
+	}
+}
+
+// 上架状态必须与搜索、批发价、库存状态等条件按 AND 组合，不能互相覆盖。
+func TestProductRepositoryListCombinesActiveStateWithOtherFilters(t *testing.T) {
+	repo, _ := setupProductStoreTest(t)
+
+	activeHit := createActiveStateProduct(t, repo, "combo-active-hit", "组合命中商品", true, true)
+	inactiveHit := createActiveStateProduct(t, repo, "combo-inactive-hit", "组合命中商品", false, true)
+	inactiveNoWholesale := createActiveStateProduct(t, repo, "combo-inactive-nowholesale", "组合命中商品", false, false)
+	unrelated := createActiveStateProduct(t, repo, "other-active", "无关商品", true, true)
+
+	onlyInactive := false
+	withWholesale := true
+
+	// 下架 + 有批发价：只剩 inactiveHit
+	got := listSlugs(t, repo, productcontract.ListFilter{IsActive: &onlyInactive, HasWholesalePrices: &withWholesale})
+	if !got[inactiveHit.Slug] || got[inactiveNoWholesale.Slug] || got[activeHit.Slug] || got[unrelated.Slug] {
+		t.Fatalf("inactive+wholesale combination mismatch: %+v", got)
+	}
+
+	// 下架 + 搜索：命中两个下架商品，且排除已上架的 activeHit
+	got = listSlugs(t, repo, productcontract.ListFilter{IsActive: &onlyInactive, Search: "组合命中"})
+	if !got[inactiveHit.Slug] || !got[inactiveNoWholesale.Slug] || got[activeHit.Slug] || got[unrelated.Slug] {
+		t.Fatalf("inactive+search combination mismatch: %+v", got)
+	}
+
+	// 已上架 + 搜索：只剩 activeHit
+	onlyActive := true
+	got = listSlugs(t, repo, productcontract.ListFilter{IsActive: &onlyActive, Search: "组合命中"})
+	if !got[activeHit.Slug] || len(got) != 1 {
+		t.Fatalf("active+search combination mismatch: %+v", got)
+	}
+
+	// 下架 + 库存正常：manual 商品剩余 10 > 0，两个下架商品都命中；再叠加批发价收窄到 1 个
+	got = listSlugs(t, repo, productcontract.ListFilter{
+		IsActive:           &onlyInactive,
+		StockStatus:        "normal",
+		LowStockThreshold:  5,
+		HasWholesalePrices: &withWholesale,
+	})
+	if !got[inactiveHit.Slug] || len(got) != 1 {
+		t.Fatalf("inactive+stock+wholesale combination mismatch: %+v", got)
+	}
+
+	// 搜索无命中时，即使上架状态匹配也必须返回空集
+	got = listSlugs(t, repo, productcontract.ListFilter{IsActive: &onlyInactive, Search: "不存在的关键词"})
+	if len(got) != 0 {
+		t.Fatalf("non-matching search should return nothing, got %+v", got)
+	}
+}
+
+// OnlyActive 是公开侧强制的「必须上架」，不应被 IsActive=false 反向覆盖成空集。
+func TestProductRepositoryListOnlyActiveTakesPrecedenceOverIsActive(t *testing.T) {
+	repo, _ := setupProductStoreTest(t)
+
+	active := createActiveStateProduct(t, repo, "precedence-active", "上架商品", true, false)
+	createActiveStateProduct(t, repo, "precedence-inactive", "下架商品", false, false)
+
+	onlyInactive := false
+	got := listSlugs(t, repo, productcontract.ListFilter{OnlyActive: true, IsActive: &onlyInactive})
+	if !got[active.Slug] || len(got) != 1 {
+		t.Fatalf("OnlyActive should win over IsActive, got %+v", got)
+	}
+}

@@ -26,6 +26,7 @@ const { t, locale } = useI18n()
 const loading = ref(false)
 const searchQuery = ref('')
 const stockStatus = ref('all')
+const statusFilter = ref('all')
 const wholesaleStatus = ref('all')
 const categoryFilter = ref('all')
 const route = useRoute()
@@ -235,6 +236,7 @@ const fetchProducts = async (options: ListFetchOptions = {}) => {
       page_size: pagination.page_size,
       search: searchQuery.value,
       stock_status: stockStatus.value,
+      is_active: statusQueryValue(),
       wholesale: wholesaleStatus.value,
       category_id: categoryFilter.value === 'all' ? undefined : categoryFilter.value,
     })
@@ -291,6 +293,13 @@ const handleSearch = () => {
 }
 const debouncedSearch = useDebounceFn(handleSearch, 300)
 
+// 上架状态三态：'all' 不下发参数，'active' → is_active=1，'inactive' → is_active=0
+const statusQueryValue = () => {
+  if (statusFilter.value === 'active') return '1'
+  if (statusFilter.value === 'inactive') return '0'
+  return undefined
+}
+
 const syncWholesaleStatusFromRoute = (value: unknown) => {
   const raw = Array.isArray(value) ? value[0] : value
   const normalized = String(raw ?? '').trim().toLowerCase()
@@ -323,6 +332,7 @@ const handleWholesaleStatusChange = () => {
 const resetFilters = () => {
   searchQuery.value = ''
   stockStatus.value = 'all'
+  statusFilter.value = 'all'
   wholesaleStatus.value = 'all'
   categoryFilter.value = 'all'
   pagination.page = 1
@@ -384,6 +394,8 @@ const toggleStatus = async (product: AdminProduct) => {
   try {
     product.is_active = newStatus
     await adminAPI.patchProduct(product.id, { is_active: newStatus })
+    // 上架状态筛选生效时，该行已不满足筛选条件，需要重新拉取以免列表与筛选结果不符
+    if (statusFilter.value !== 'all') fetchProducts({ preserveRows: true })
   } catch (err: any) {
     product.is_active = !newStatus
     if (isNotifiedError(err)) return
@@ -528,6 +540,18 @@ watch(
               >
                 {{ buildAdminCategoryPath(item.category, categoryMap, (c) => getLocalizedText(c.name)) }}
               </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div class="w-full md:w-48">
+          <Select v-model="statusFilter" @update:modelValue="handleSearch">
+            <SelectTrigger class="h-9 w-full">
+              <SelectValue :placeholder="t('admin.products.filters.statusPlaceholder')" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{{ t('admin.products.filters.statusAll') }}</SelectItem>
+              <SelectItem value="active">{{ t('admin.products.filters.statusActive') }}</SelectItem>
+              <SelectItem value="inactive">{{ t('admin.products.filters.statusInactive') }}</SelectItem>
             </SelectContent>
           </Select>
         </div>

@@ -65,6 +65,10 @@ func (r *ProductStore) List(filter productcontract.ListFilter) ([]productdomain.
 	} else if filter.CategoryID != "" {
 		query = query.Where("category_id = ?", filter.CategoryID)
 	}
+	// 三态上架筛选：OnlyActive 已强制 is_active = true，此时不再叠加
+	if filter.IsActive != nil && !filter.OnlyActive {
+		query = query.Where("products.is_active = ?", *filter.IsActive)
+	}
 	if len(filter.ExcludeProductIDs) > 0 {
 		query = query.Where("products.id NOT IN ?", filter.ExcludeProductIDs)
 	}

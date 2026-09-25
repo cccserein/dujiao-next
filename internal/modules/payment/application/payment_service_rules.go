@@ -1,6 +1,7 @@
 package application
 
 import (
+	"fmt"
 	"strings"
 
 	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/dujiao-next/internal/constants"
 	settingsapp "github.com/dujiao-next/internal/modules/settings/application"
-	"github.com/dujiao-next/internal/shared/jsonmap"
 
 	"github.com/shopspring/decimal"
 )
@@ -31,17 +31,68 @@ func calculatePaymentAmounts(baseAmount, feeRate, fixedFee decimal.Decimal, cust
 	return baseAmount, feeAmount, constants.PaymentFeePolicyMerchantAbsorbed
 }
 
-// paymentCoveredOrderAmount 推算一笔支付创建时承诺覆盖的订单在线应付额。
+// paymentExchangeRate 读取创建支付时存下的渠道换汇汇率快照
+// （ProviderPayload["exchange_rate"]）。存在即说明这笔支付发生过法币换汇（渠道配置了
+// target_currency + exchange_rate，见各 adapter 的 cfg.NeedsCurrencyConversion 分支），
+// applyProviderPayment 回写后 payment.Amount/Currency 已经不是订单原始币种。返回零值
+// 和 false 表示未换汇或快照缺失/无效。
+func paymentExchangeRate(payment *paymentdomain.Payment) (decimal.Decimal, bool) {
+	if payment == nil || payment.ProviderPayload == nil {
+		return decimal.Zero, false
+	}
+	rateRaw, ok := payment.ProviderPayload["exchange_rate"]
+	if !ok {
+		return decimal.Zero, false
+	}
+	rateStr := strings.TrimSpace(fmt.Sprint(rateRaw))
+	if rateStr == "" {
+		return decimal.Zero, false
+	}
+	rate, err := decimal.NewFromString(rateStr)
+	if err != nil || !rate.IsPositive() {
+		return decimal.Zero, false
+	}
+	return rate, true
+}
+
+// paymentCoveredOrderAmount 推算一笔支付回调实际覆盖的订单在线应付额（订单币种口径）。
 //
-// Amount / FeeAmount / FeePolicy 均为创建时快照：用户承担手续费的策略下 Amount
-// 含加收部分，必须扣除后才是订单侧的抵扣基数；商家承担或无手续费时 Amount 即基数。
+// callbackAmount 是本次回调携带的实际到账金额，仅在发生换汇的场景下使用（见下）。
+// Amount / FeeAmount / FeePolicy 均为创建时快照：用户承担手续费的策略下 Amount 含
+// 加收部分，必须扣除后才是订单侧的抵扣基数；商家承担或无手续费时 Amount 即基数。
 // 升级前未写入策略快照（FeePolicy 为空）且带正数手续费的历史记录，与 CreatePayment
 // 的 legacy 判定保持一致，按用户承担解释。
-func paymentCoveredOrderAmount(payment *paymentdomain.Payment) decimal.Decimal {
+//
+// 只有发生换汇的支付需要特殊处理：渠道按配置的汇率把订单原始币种（一般是 CNY）金额
+// 换算成结算币种（USD/GBP 等）下单（如 Stripe 配置 target_currency+exchange_rate），
+// applyProviderPayment 回写后 payment.Amount/Currency 变为结算币种；网关 webhook/回调
+// 本身直接返回结算币种数值，不会换算回订单币种。若直接用 payment.Amount 与订单原始
+// 币种总额比较，两个不同币种的数值硬比必然判定为金额不足。正确做法是用本次回调的
+// 实际到账金额（callbackAmount，结算币种）除以创建支付时存下的渠道汇率快照
+// ProviderPayload["exchange_rate"]，换算回订单币种。未发生换汇的渠道，回调金额本来
+// 就是订单币种，继续使用 payment.Amount 原值。
+func paymentCoveredOrderAmount(payment *paymentdomain.Payment, callbackAmount decimal.Decimal) decimal.Decimal {
 	if payment == nil {
 		return decimal.Zero
 	}
 	covered := payment.Amount.Decimal
+	if rate, ok := paymentExchangeRate(payment); ok {
+		source := callbackAmount
+		if source.IsZero() {
+			source = payment.Amount.Decimal
+		}
+		covered = source.Div(rate)
+	} else if payment.ProviderPayload != nil {
+		if raw, ok := payment.ProviderPayload["original_amount"]; ok {
+			// 缺少汇率快照（历史数据遗漏字段）时退回订单原价，保底不误判欠付，
+			// 但无法侦测网关实际少到账的情况。
+			if s := strings.TrimSpace(fmt.Sprint(raw)); s != "" {
+				if original, err := decimal.NewFromString(s); err == nil {
+					covered = original
+				}
+			}
+		}
+	}
 	fee := payment.FeeAmount.Decimal
 	switch payment.FeePolicy {
 	case constants.PaymentFeePolicyCustomerSurcharge, constants.PaymentFeePolicyLegacyCustomerSurcharge:
@@ -181,36 +232,5 @@ func buildOrderSubject(order *orderdomain.Order) string {
 	if order == nil {
 		return ""
 	}
-	for i := range order.Items {
-		if title := pickOrderItemTitle(order.Items[i].TitleJSON); title != "" {
-			return title
-		}
-	}
-	for i := range order.Children {
-		for j := range order.Children[i].Items {
-			if title := pickOrderItemTitle(order.Children[i].Items[j].TitleJSON); title != "" {
-				return title
-			}
-		}
-	}
 	return strings.TrimSpace(order.OrderNo)
-}
-
-func pickOrderItemTitle(title jsonmap.JSON) string {
-	if title == nil {
-		return ""
-	}
-	for _, key := range constants.SupportedLocales {
-		if val, ok := title[key]; ok {
-			if str, ok := val.(string); ok && strings.TrimSpace(str) != "" {
-				return strings.TrimSpace(str)
-			}
-		}
-	}
-	for _, val := range title {
-		if str, ok := val.(string); ok && strings.TrimSpace(str) != "" {
-			return strings.TrimSpace(str)
-		}
-	}
-	return ""
 }

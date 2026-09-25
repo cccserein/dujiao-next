@@ -170,7 +170,8 @@ func (s *Service) GetPublicBySlugForTenant(tenant reseller.TenantContext, resell
 }
 
 // ListAdmin 获取后台商品列表
-func (s *Service) ListAdmin(categoryID, search, fulfillmentType, stockStatus string, hasWholesalePrices *bool, lowStockThreshold int, page, pageSize int) ([]productdomain.Product, int64, error) {
+// isActive 为三态上架筛选：nil=不限，true=仅已上架，false=仅已下架。
+func (s *Service) ListAdmin(categoryID, search, fulfillmentType, stockStatus string, hasWholesalePrices, isActive *bool, lowStockThreshold int, page, pageSize int) ([]productdomain.Product, int64, error) {
 	filter := productcontract.ListFilter{
 		Page:               page,
 		PageSize:           pageSize,
@@ -179,6 +180,7 @@ func (s *Service) ListAdmin(categoryID, search, fulfillmentType, stockStatus str
 		FulfillmentType:    strings.TrimSpace(fulfillmentType),
 		StockStatus:        normalizeStockStatus(stockStatus),
 		HasWholesalePrices: hasWholesalePrices,
+		IsActive:           isActive,
 		LowStockThreshold:  lowStockThreshold,
 		OnlyActive:         false,
 		WithCategory:       true,

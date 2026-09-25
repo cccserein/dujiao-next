@@ -15,6 +15,7 @@ func registerUpstreamRoutes(
 	upstreamHandler *upstreamtransport.Handler,
 	redisClient *redis.Client,
 	upstreamAPIRule middleware.RateLimitRule,
+	callbackRule middleware.RateLimitRule,
 ) {
 	// 上游 API（本站作为 B 站点，暴露给下游 A 调用）
 	upstreamAPI := apiV1.Group("/upstream")
@@ -23,5 +24,5 @@ func registerUpstreamRoutes(
 	upstreamtransport.RegisterAuthenticatedRoutes(upstreamAPI, upstreamHandler)
 
 	// 上游回调接收（本站作为 A 站点，接收 B 的回调）
-	apiV1.POST("/upstream/callback", upstreamHandler.HandleCallback)
+	apiV1.POST("/upstream/callback", middleware.RateLimitMiddleware(redisClient, callbackRule, middleware.KeyByIP), upstreamHandler.HandleCallback)
 }

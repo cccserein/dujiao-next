@@ -273,6 +273,8 @@ export function useCheckout() {
   const checkoutMode = ref<'guest' | 'member'>('guest')
   const guestEmail = ref('')
   const guestPassword = ref('')
+  const GUEST_PASSWORD_MIN_LENGTH = 6
+  const guestPasswordValid = computed(() => guestPassword.value.trim().length >= GUEST_PASSWORD_MIN_LENGTH)
   const guestCaptchaPayload = ref<CaptchaPayload>({})
   const guestTurnstileToken = ref('')
   const guestImageCaptchaRef = ref<InstanceType<typeof ImageCaptcha> | null>(null)
@@ -588,7 +590,7 @@ export function useCheckout() {
     if (requiresOnlineChannel.value && selectedChannelAmountHint.value) return false
     if (userAuthStore.isAuthenticated) return true
     if (checkoutMode.value !== 'guest') return false
-    if (!guestEmail.value.trim() || !guestPassword.value.trim() || !guestEmailValid.value) return false
+    if (!guestEmail.value.trim() || !guestPassword.value.trim() || !guestEmailValid.value || !guestPasswordValid.value) return false
     if (!guestCaptchaEnabled.value) return true
     if (captchaProvider.value === 'image') {
       return Boolean(guestCaptchaPayload.value.captcha_id && guestCaptchaPayload.value.captcha_code)
@@ -620,6 +622,7 @@ export function useCheckout() {
     if (checkoutMode.value !== 'guest') return t('checkout.errors.loginOrGuest')
     if (!guestEmail.value.trim() || !guestPassword.value.trim()) return t('checkout.errors.missingGuest')
     if (!guestEmailValid.value) return t('error.email_invalid')
+    if (!guestPasswordValid.value) return t('checkout.errors.guestPasswordTooShort')
     if (guestCaptchaEnabled.value) {
       if (captchaProvider.value === 'image' && (!guestCaptchaPayload.value.captcha_id || !guestCaptchaPayload.value.captcha_code)) {
         return t('auth.common.captchaRequired')

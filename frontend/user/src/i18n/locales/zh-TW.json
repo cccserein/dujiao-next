@@ -1204,6 +1204,7 @@
     "errors": {
       "emptyCart": "購物車為空",
       "missingGuest": "請輸入信箱與訂單密碼",
+      "guestPasswordTooShort": "訂單密碼至少 6 位",
       "loginOrGuest": "請先登入或使用遊客購買",
       "submitFailed": "提交失敗，請稍後重試",
       "manualFormInvalid": "請先完善交付資訊再提交",

@@ -3,8 +3,10 @@ package stripeadapter
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	paymentcontract "github.com/dujiao-next/internal/modules/payment/contract"
@@ -164,6 +166,46 @@ func TestStripeAdapter_CreatePayment_NoExchangeRate_AmountSentEqualsOriginal(t *
 	}
 	if _, ok := result.Payload["original_amount"]; ok {
 		t.Fatal("Payload should NOT contain original_amount when no conversion configured")
+	}
+}
+
+// TestStripeAdapter_CreatePayment_EmailPassedToCustomerEmail 守护 #286：
+// GatewayCreateInput.Email 必须原样传给 stripe.CreateInput.Email，
+// 最终作为 customer_email 提交给 Stripe，实现 Checkout 页面邮箱预填充。
+func TestStripeAdapter_CreatePayment_EmailPassedToCustomerEmail(t *testing.T) {
+	var gotForm string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotForm = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"cs_test_email_001","url":"https://checkout.stripe.com/pay/cs_test_email_001","status":"open"}`))
+	}))
+	defer server.Close()
+
+	a := NewStripeAdapter()
+	raw := jsonmap.JSON{
+		"secret_key":           "sk_test_abc",
+		"webhook_secret":       "whsec_xyz",
+		"success_url":          "https://shop.example.com/success",
+		"cancel_url":           "https://shop.example.com/cancel",
+		"api_base_url":         server.URL,
+		"payment_method_types": []any{"card"},
+	}
+
+	input := paymentcontract.GatewayCreateInput{
+		OrderNo:   "ORDER-EMAIL-1",
+		Subject:   "email prefill test",
+		Currency:  "USD",
+		Amount:    money.FromDecimal(decimal.NewFromInt(5)),
+		ReturnURL: "https://shop.example.com/pay",
+		Email:     "buyer@example.com",
+	}
+
+	if _, err := a.CreatePayment(context.Background(), raw, input); err != nil {
+		t.Fatalf("CreatePayment() failed: %v", err)
+	}
+	if !strings.Contains(gotForm, "customer_email=buyer%40example.com") {
+		t.Fatalf("expected form to contain customer_email=buyer%%40example.com, got %q", gotForm)
 	}
 }
 

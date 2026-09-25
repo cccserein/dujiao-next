@@ -1157,6 +1157,7 @@
     "errors": {
       "emptyCart": "购物车为空",
       "missingGuest": "请输入邮箱与订单密码",
+      "guestPasswordTooShort": "订单密码至少 6 位",
       "loginOrGuest": "请先登录或使用游客购买",
       "submitFailed": "提交失败，请稍后重试",
       "manualFormInvalid": "请完善交付信息后再提交",

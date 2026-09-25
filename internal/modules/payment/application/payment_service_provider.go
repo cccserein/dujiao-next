@@ -157,6 +157,9 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *o
 	}
 	returnURLQuery := buildPaymentReturnQuery(input, order, returnMarker, "")
 
+	// customerEmail 用于渠道预填邮箱（如 Stripe customer_email），来自会员邮箱或游客下单邮箱。
+	customerEmail, _, _ := s.resolveNotificationCustomer(order)
+
 	createInput := paymentcontract.GatewayCreateInput{
 		PaymentID:      payment.ID,
 		OrderID:        order.ID,
@@ -164,6 +167,7 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *o
 		Subject:        buildOrderSubject(order),
 		Amount:         payment.Amount,
 		Currency:       payment.Currency,
+		Email:          strings.TrimSpace(customerEmail),
 		ClientIP:       strings.TrimSpace(input.ClientIP),
 		ChannelType:    channel.ChannelType,
 		Extra:          extra,

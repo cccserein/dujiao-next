@@ -284,7 +284,7 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 		// 混合支付切换渠道会退回余额并抬高在线应付额，而旧链接在网关侧依然可付，
 		// 缺少这道校验就能用旧链接的小额付款换到整单商品。
 		requiredOnlineAmount := normalizeOrderAmount(lockedOrder.TotalAmount.Decimal.Sub(lockedOrder.WalletPaidAmount.Decimal))
-		coveredOnlineAmount := paymentCoveredOrderAmount(lockedPayment)
+		coveredOnlineAmount := paymentCoveredOrderAmount(lockedPayment, input.Amount.Decimal)
 		underpaid := status == constants.PaymentStatusSuccess && orderOpen &&
 			coveredOnlineAmount.LessThan(requiredOnlineAmount)
 

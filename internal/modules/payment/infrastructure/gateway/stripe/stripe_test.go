@@ -89,6 +89,60 @@ func TestCreatePaymentWeChatPayClientOption(t *testing.T) {
 	}
 }
 
+func TestCreatePaymentCustomerEmail(t *testing.T) {
+	tests := []struct {
+		name          string
+		email         string
+		expectSet     bool
+		expectedValue string
+	}{
+		{name: "WithEmail", email: " user@example.com ", expectSet: true, expectedValue: "user@example.com"},
+		{name: "EmptyEmail", email: "", expectSet: false},
+		{name: "WhitespaceEmail", email: "   ", expectSet: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var form url.Values
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				form, _ = url.ParseQuery(string(body))
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"cs_test_123","url":"https://checkout.stripe.com/c/pay/cs_test_123","status":"open"}`))
+			}))
+			defer server.Close()
+
+			cfg, err := ParseConfig(map[string]interface{}{
+				"secret_key":           "sk_test_123",
+				"webhook_secret":       "whsec_123",
+				"success_url":          "https://example.com/payment?stripe_return=1",
+				"cancel_url":           "https://example.com/payment?stripe_cancel=1",
+				"api_base_url":         server.URL,
+				"payment_method_types": []interface{}{"card"},
+			})
+			if err != nil {
+				t.Fatalf("parse config failed: %v", err)
+			}
+
+			_, err = CreatePayment(context.Background(), cfg, CreateInput{
+				OrderNo:  "ORDER-1002",
+				Amount:   "9.90",
+				Currency: "CNY",
+				Email:    tc.email,
+			})
+			if err != nil {
+				t.Fatalf("create payment failed: %v", err)
+			}
+			got := form.Get("customer_email")
+			if tc.expectSet && got != tc.expectedValue {
+				t.Fatalf("expected customer_email %q, got %q", tc.expectedValue, got)
+			}
+			if !tc.expectSet && got != "" {
+				t.Fatalf("expected no customer_email, got %q", got)
+			}
+		})
+	}
+}
+
 func TestVerifyAndParseWebhookCheckoutCompleted(t *testing.T) {
 	now := time.Unix(1760000000, 0)
 	cfg := &Config{

@@ -1204,6 +1204,7 @@
     "errors": {
       "emptyCart": "Your cart is empty",
       "missingGuest": "Please enter email and order password",
+      "guestPasswordTooShort": "Order password must be at least 6 characters",
       "loginOrGuest": "Please login or use guest checkout",
       "submitFailed": "Submit failed, please try again",
       "manualFormInvalid": "Please complete required information before submitting",

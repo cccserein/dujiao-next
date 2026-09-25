@@ -64,6 +64,7 @@ func registerStorefrontRoutes(
 	loginRule middleware.RateLimitRule,
 	guestReadRule middleware.RateLimitRule,
 	guestWriteRule middleware.RateLimitRule,
+	giftCardRedeemRule middleware.RateLimitRule,
 ) {
 	storefront := apiV1.Group("")
 	storefront.Use(middleware.ResellerTenantMiddleware(c.ResellerDomainResolver))
@@ -137,7 +138,8 @@ func registerStorefrontRoutes(
 		paymenttransport.RegisterUserWriteRoutes(user, paymentWriteHandler)
 		paymenttransport.RegisterUserLatestRoute(user, paymentLatestHandler)
 		wallettransport.RegisterUserRoutes(user, userWalletHandler)
-		giftcardtransport.RegisterUserRoutes(user, userGiftCardHandler)
+		giftCardRedeem := user.Group("", middleware.RateLimitMiddleware(redisClient, giftCardRedeemRule, middleware.KeyByUserIDAndIP))
+		giftcardtransport.RegisterUserRoutes(giftCardRedeem, userGiftCardHandler)
 		affiliatetransport.RegisterUserRoutes(user, affiliateHandler)
 
 		resellerConsole := user.Group("/reseller")
@@ -154,7 +156,8 @@ func registerStorefrontRoutes(
 	}
 }
 
-func registerPaymentCallbackRoutes(apiV1 *gin.RouterGroup, callbackHandler *paymentcallbacktransport.Handler, webhookHandler *paymenttransport.WebhookHandler) {
-	paymentcallbacktransport.RegisterRoutes(apiV1, callbackHandler)
-	paymenttransport.RegisterWebhookRoutes(apiV1, webhookHandler)
+func registerPaymentCallbackRoutes(apiV1 *gin.RouterGroup, callbackHandler *paymentcallbacktransport.Handler, webhookHandler *paymenttransport.WebhookHandler, redisClient *redis.Client, callbackRule middleware.RateLimitRule) {
+	callbacks := apiV1.Group("", middleware.RateLimitMiddleware(redisClient, callbackRule, middleware.KeyByIP))
+	paymentcallbacktransport.RegisterRoutes(callbacks, callbackHandler)
+	paymenttransport.RegisterWebhookRoutes(callbacks, webhookHandler)
 }

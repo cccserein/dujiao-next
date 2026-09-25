@@ -20,7 +20,7 @@ const upstreamCredentialIDKey = "upstream_credential_id"
 // UpstreamCredentialStore 只暴露签名鉴权链路所需的凭证能力。
 type UpstreamCredentialStore interface {
 	GetByApiKey(apiKey string) (*apicredentialdomain.ApiCredential, error)
-	Update(credential *apicredentialdomain.ApiCredential) error
+	TouchLastUsedAt(id uint, at time.Time) error
 }
 
 // UpstreamAPIAuthMiddleware 上游 API 签名鉴权中间件
@@ -84,14 +84,16 @@ func UpstreamAPIAuthMiddleware(credRepo UpstreamCredentialStore) gin.HandlerFunc
 			return
 		}
 
-		// 更新最后使用时间（异步，不阻塞请求）
+		// 更新最后使用时间（异步、只写单列、60s 节流）
 		now := time.Now()
-		cred.LastUsedAt = &now
-		go func() {
-			if updateErr := credRepo.Update(cred); updateErr != nil {
-				logger.Warnw("upstream_auth_update_last_used_failed", "error", updateErr)
-			}
-		}()
+		if cred.LastUsedAt == nil || now.Sub(*cred.LastUsedAt) > time.Minute {
+			credID := cred.ID
+			go func() {
+				if updateErr := credRepo.TouchLastUsedAt(credID, now); updateErr != nil {
+					logger.Warnw("upstream_auth_update_last_used_failed", "error", updateErr)
+				}
+			}()
+		}
 
 		// 将凭证信息存入 context
 		c.Set(upstreamUserIDKey, cred.UserID)

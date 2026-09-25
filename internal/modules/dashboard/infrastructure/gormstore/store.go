@@ -32,9 +32,11 @@ func paidOrderStatuses() []string {
 }
 
 func onlinePaymentBase(db *gorm.DB, startAt, endAt time.Time) *gorm.DB {
+	timeWhere, timeArgs := timeRangeQuery(db, "payments.created_at", startAt, endAt)
+	args := append(timeArgs, constants.PaymentProviderWallet)
 	return db.Model(&paymentdomain.Payment{}).
 		Where("payments.deleted_at IS NULL").
-		Where("payments.created_at >= ? AND payments.created_at < ? AND payments.provider_type <> ?", startAt, endAt, constants.PaymentProviderWallet)
+		Where(timeWhere+" AND payments.provider_type <> ?", args...)
 }
 
 var _ dashboard.Repository = (*Store)(nil)

@@ -3,6 +3,7 @@ package tokenpay
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -214,7 +215,7 @@ func VerifyCallback(data *CallbackData, notifySecret string) error {
 		return ErrConfigInvalid
 	}
 	expected := SignPayload(data.Raw, notifySecret)
-	if !strings.EqualFold(expected, strings.TrimSpace(data.Signature)) {
+	if !hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(strings.TrimSpace(data.Signature)))) {
 		return ErrSignatureInvalid
 	}
 	return nil

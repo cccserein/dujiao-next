@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
@@ -312,8 +313,11 @@ func VerifyCallback(cfg *Config, form map[string][]string) error {
 	case VersionV2:
 		return verifyRSA(content, sign, cfg.PublicKey)
 	default:
+		if strings.TrimSpace(cfg.MerchantKey) == "" {
+			return ErrConfigInvalid
+		}
 		expected := signMD5(content + cfg.MerchantKey)
-		if !strings.EqualFold(expected, sign) {
+		if !hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(sign))) {
 			return ErrSignatureInvalid
 		}
 	}
