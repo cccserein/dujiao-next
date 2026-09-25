@@ -3,6 +3,7 @@ package shop
 import (
 	"encoding/hex"
 	"errors"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -22,6 +23,7 @@ type Config struct {
 	BepURL         string
 	BepToken       string
 	BepCurrencies  string
+	TrustedProxies []net.IPNet
 }
 
 func LoadConfig() (Config, error) {
@@ -54,6 +56,17 @@ func LoadConfig() (Config, error) {
 	if c.Environment == "production" && u.Scheme != "https" {
 		return c, errors.New("production SHOP_APP_URL must use https")
 	}
+	for _, raw := range strings.Split(os.Getenv("SHOP_TRUSTED_PROXY_CIDRS"), ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(raw)
+		if err != nil {
+			return c, errors.New("SHOP_TRUSTED_PROXY_CIDRS must contain valid CIDRs")
+		}
+		c.TrustedProxies = append(c.TrustedProxies, *network)
+	}
 	key, err := hex.DecodeString(strings.TrimSpace(os.Getenv("SHOP_CARD_KEY_HEX")))
 	if err != nil || len(key) != 32 {
 		return c, errors.New("SHOP_CARD_KEY_HEX must contain 32 random bytes in hex")
@@ -63,6 +76,11 @@ func LoadConfig() (Config, error) {
 	case "mock":
 		if c.Environment != "development" {
 			return c, errors.New("mock payment is forbidden in production")
+		}
+		host := u.Hostname()
+		ip := net.ParseIP(host)
+		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			return c, errors.New("mock payment requires a loopback SHOP_APP_URL")
 		}
 		mockKey, err := hex.DecodeString(strings.TrimSpace(os.Getenv("SHOP_MOCK_KEY_HEX")))
 		if err != nil || len(mockKey) < 32 {

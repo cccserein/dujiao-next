@@ -128,9 +128,12 @@ func (a *App) CreatePayment(ctx context.Context, userID, orderID int64, provider
 		a.markPaymentStartFailed(ctx, orderID, checkout.PaymentID)
 		return Checkout{}, errors.New("payment gateway unavailable")
 	}
-	_, err = a.db.Exec(ctx, `UPDATE payments SET pay_url=$1,provider_ref=$2,status='pending' WHERE id=$3 AND status='initiated'`, checkout.URL, started.ProviderRef, checkout.PaymentID)
+	updated, err := a.db.Exec(ctx, `UPDATE payments SET pay_url=$1,provider_ref=$2,status='pending' WHERE id=$3 AND status='initiated'`, checkout.URL, started.ProviderRef, checkout.PaymentID)
 	if err != nil {
 		return Checkout{}, err
+	}
+	if updated.RowsAffected() != 1 {
+		return Checkout{}, ErrOrderClosed
 	}
 	return checkout, nil
 }
@@ -264,16 +267,16 @@ func (a *App) GetMockPaymentOrder(ctx context.Context, user User, paymentID stri
 		return o, ErrForbidden
 	}
 	var provider, paymentStatus string
-	err := a.db.QueryRow(ctx, `SELECT o.id,o.user_id,o.amount_cents,o.currency,o.status,p.provider,p.status
+	err := a.db.QueryRow(ctx, `SELECT o.id,o.user_id,o.amount_cents,o.currency,o.status,o.expires_at,p.provider,p.status
 		FROM payments p JOIN orders o ON o.id=p.order_id WHERE p.id=$1`, paymentID).
-		Scan(&o.ID, &o.UserID, &o.AmountCents, &o.Currency, &o.Status, &provider, &paymentStatus)
+		Scan(&o.ID, &o.UserID, &o.AmountCents, &o.Currency, &o.Status, &o.ExpiresAt, &provider, &paymentStatus)
 	if isNoRows(err) || o.UserID != user.ID || provider != "mock" {
 		return Order{}, ErrNotFound
 	}
 	if err != nil {
 		return Order{}, err
 	}
-	if o.Status != "pending" || paymentStatus != "pending" {
+	if o.Status != "pending" || paymentStatus != "pending" || !o.ExpiresAt.After(time.Now()) {
 		return Order{}, ErrOrderClosed
 	}
 	return o, nil

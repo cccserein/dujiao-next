@@ -3,12 +3,12 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: shop
-      POSTGRES_USER: shop
-      POSTGRES_PASSWORD: ${SHOP_DB_PASSWORD:?set SHOP_DB_PASSWORD}
+      POSTGRES_USER: shop_owner
+      POSTGRES_PASSWORD: ${SHOP_DB_OWNER_PASSWORD:?set SHOP_DB_OWNER_PASSWORD}
     volumes:
       - shop_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      test: ["CMD-SHELL", "pg_isready -U shop_owner -d shop"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -21,7 +21,7 @@ services:
       db:
         condition: service_healthy
     environment: &shop_env
-      SHOP_DATABASE_URL: postgres://shop:${SHOP_DB_PASSWORD}@db:5432/shop?sslmode=disable
+      SHOP_DATABASE_URL: postgres://shop_owner:${SHOP_DB_OWNER_PASSWORD}@db:5432/shop?sslmode=disable
       SHOP_CARD_KEY_HEX: ${SHOP_CARD_KEY_HEX:?set SHOP_CARD_KEY_HEX}
       SHOP_APP_URL: ${SHOP_APP_URL:?set SHOP_APP_URL}
       SHOP_LISTEN_ADDR: 0.0.0.0:8080
@@ -34,17 +34,41 @@ services:
       SHOP_BEPUSDT_URL: ${SHOP_BEPUSDT_URL:-}
       SHOP_BEPUSDT_TOKEN: ${SHOP_BEPUSDT_TOKEN:-}
       SHOP_BEPUSDT_CURRENCIES: ${SHOP_BEPUSDT_CURRENCIES:-USDT}
+      SHOP_TRUSTED_PROXY_CIDRS: ${SHOP_TRUSTED_PROXY_CIDRS:-}
     networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  grant:
+    image: postgres:16-alpine
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      SHOP_DB_OWNER_PASSWORD: ${SHOP_DB_OWNER_PASSWORD:?set SHOP_DB_OWNER_PASSWORD}
+      SHOP_DB_APP_PASSWORD: ${SHOP_DB_APP_PASSWORD:?set SHOP_DB_APP_PASSWORD}
+    volumes:
+      - ./docker/grant-app-role.sh:/grant-app-role.sh:ro
+    entrypoint: ["/bin/sh", "/grant-app-role.sh"]
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 
   shop:
     build: .
     command: ["serve"]
     depends_on:
-      migrate:
+      grant:
         condition: service_completed_successfully
-    environment: *shop_env
+    environment:
+      <<: *shop_env
+      SHOP_DATABASE_URL: postgres://shop_app:${SHOP_DB_APP_PASSWORD}@db:5432/shop?sslmode=disable
     ports:
-      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:${SHOP_HOST_PORT:-18080}:8080"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
       interval: 10s
@@ -52,6 +76,11 @@ services:
       retries: 5
     restart: unless-stopped
     networks: [private, edge]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
 
 networks:
   private:

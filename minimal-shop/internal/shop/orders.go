@@ -17,6 +17,21 @@ func (a *App) CreateOrder(ctx context.Context, userID, productID int64) (int64, 
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	var lockedUserID int64
+	err = tx.QueryRow(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&lockedUserID)
+	if isNoRows(err) {
+		return 0, ErrForbidden
+	}
+	if err != nil {
+		return 0, err
+	}
+	var pendingCount int
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM orders WHERE user_id=$1 AND status='pending' AND expires_at>now()`, userID).Scan(&pendingCount); err != nil {
+		return 0, err
+	}
+	if pendingCount >= 3 {
+		return 0, ErrOrderLimit
+	}
 	var p Product
 	err = tx.QueryRow(ctx, `SELECT title,price_cents,currency,active FROM products WHERE id=$1 FOR SHARE`, productID).
 		Scan(&p.Title, &p.PriceCents, &p.Currency, &p.Active)
@@ -68,6 +83,10 @@ func (a *App) GetOrder(ctx context.Context, requester User, id int64) (Order, er
 	}
 	if requester.Role != "admin" && o.UserID != requester.ID {
 		return Order{}, ErrNotFound
+	}
+	if o.Status == "pending" && !o.ExpiresAt.After(time.Now()) {
+		o.Status = "expired"
+		o.PayURL = ""
 	}
 	if o.Status == "delivered" {
 		var nonce, ciphertext []byte

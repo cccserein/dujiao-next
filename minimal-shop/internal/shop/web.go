@@ -66,6 +66,7 @@ func NewWeb(app *App, cfg Config, logger *slog.Logger) http.Handler {
 		writer.Header().Set("Referrer-Policy", "no-referrer")
 		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+		writer.Header().Set("Cache-Control", "no-store")
 		if cfg.Environment == "production" {
 			writer.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}
@@ -85,7 +86,7 @@ func (w *Web) sameOrigin(r *http.Request) bool {
 }
 
 func (w *Web) current(r *http.Request) *User {
-	cookie, err := r.Cookie("shop_session")
+	cookie, err := r.Cookie(w.sessionCookieName())
 	if err != nil {
 		return nil
 	}
@@ -94,6 +95,18 @@ func (w *Web) current(r *http.Request) *User {
 		return nil
 	}
 	return &user
+}
+
+func (w *Web) sessionCookieName() string {
+	if w.cfg.Environment == "production" {
+		return "__Host-shop_session"
+	}
+	return "shop_session"
+}
+
+func (w *Web) secureCookies() bool {
+	parsed, err := url.Parse(w.cfg.AppURL)
+	return err == nil && strings.EqualFold(parsed.Scheme, "https")
 }
 
 func (w *Web) requireUser(response http.ResponseWriter, request *http.Request) *User {
@@ -138,6 +151,8 @@ func (w *Web) fail(response http.ResponseWriter, request *http.Request, err erro
 		status, message = http.StatusForbidden, "无权访问"
 	case errors.Is(err, ErrOutOfStock):
 		status, message = http.StatusConflict, "库存不足"
+	case errors.Is(err, ErrOrderLimit):
+		status, message = http.StatusTooManyRequests, "未支付订单过多，请先完成或等待过期"
 	case errors.Is(err, ErrOrderClosed):
 		status, message = http.StatusConflict, "订单已关闭"
 	case errors.Is(err, ErrPaymentProcessing):
@@ -187,7 +202,7 @@ func (w *Web) register(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	email, password := request.PostFormValue("email"), request.PostFormValue("password")
-	if !w.limiter.allow("register:"+clientIP(request), 30, time.Hour) {
+	if !w.limiter.allow("register:"+clientIP(request, w.cfg.TrustedProxies), 30, time.Hour) {
 		http.Error(response, "too many requests", http.StatusTooManyRequests)
 		return
 	}
@@ -209,7 +224,7 @@ func (w *Web) login(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if !w.limiter.allow(accountLimitKey(request.PostFormValue("email")), 10, 15*time.Minute) ||
-		!w.limiter.allow("login-ip:"+clientIP(request), 120, time.Hour) {
+		!w.limiter.allow("login-ip:"+clientIP(request, w.cfg.TrustedProxies), 120, time.Hour) {
 		http.Error(response, "too many requests", http.StatusTooManyRequests)
 		return
 	}
@@ -227,8 +242,8 @@ func (w *Web) loginWithCredentials(response http.ResponseWriter, request *http.R
 		validity = 12 * time.Hour
 	}
 	http.SetCookie(response, &http.Cookie{
-		Name: "shop_session", Value: token, Path: "/", HttpOnly: true,
-		Secure: strings.HasPrefix(w.cfg.AppURL, "https://"), SameSite: http.SameSiteLaxMode,
+		Name: w.sessionCookieName(), Value: token, Path: "/", HttpOnly: true,
+		Secure: w.secureCookies(), SameSite: http.SameSiteLaxMode,
 		Expires: time.Now().Add(validity),
 	})
 	if user.Role == "admin" {
@@ -239,11 +254,11 @@ func (w *Web) loginWithCredentials(response http.ResponseWriter, request *http.R
 }
 
 func (w *Web) logout(response http.ResponseWriter, request *http.Request) {
-	if cookie, err := request.Cookie("shop_session"); err == nil {
+	if cookie, err := request.Cookie(w.sessionCookieName()); err == nil {
 		w.app.Logout(request.Context(), cookie.Value)
 	}
-	http.SetCookie(response, &http.Cookie{Name: "shop_session", Path: "/", MaxAge: -1, HttpOnly: true,
-		Secure: strings.HasPrefix(w.cfg.AppURL, "https://"), SameSite: http.SameSiteLaxMode})
+	http.SetCookie(response, &http.Cookie{Name: w.sessionCookieName(), Path: "/", MaxAge: -1, HttpOnly: true,
+		Secure: w.secureCookies(), SameSite: http.SameSiteLaxMode})
 	http.Redirect(response, request, "/", http.StatusSeeOther)
 }
 
@@ -333,6 +348,10 @@ func (w *Web) pay(response http.ResponseWriter, request *http.Request) {
 }
 
 func (w *Web) mockPayPage(response http.ResponseWriter, request *http.Request) {
+	if w.cfg.PaymentMode != "mock" {
+		http.NotFound(response, request)
+		return
+	}
 	user := w.requireUser(response, request)
 	if user == nil {
 		return
@@ -346,6 +365,10 @@ func (w *Web) mockPayPage(response http.ResponseWriter, request *http.Request) {
 }
 
 func (w *Web) mockPay(response http.ResponseWriter, request *http.Request) {
+	if w.cfg.PaymentMode != "mock" {
+		http.NotFound(response, request)
+		return
+	}
 	user := w.requireUser(response, request)
 	if user == nil {
 		return
@@ -378,6 +401,10 @@ func (w *Web) mockPay(response http.ResponseWriter, request *http.Request) {
 }
 
 func (w *Web) mockWebhook(response http.ResponseWriter, request *http.Request) {
+	if w.cfg.PaymentMode != "mock" {
+		http.NotFound(response, request)
+		return
+	}
 	request.Body = http.MaxBytesReader(response, request.Body, 64<<10)
 	body, err := io.ReadAll(request.Body)
 	if err != nil {
@@ -430,6 +457,11 @@ func (w *Web) providerWebhook(response http.ResponseWriter, request *http.Reques
 	if err != nil {
 		response.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(response, "fail")
+		return
+	}
+	if provider == "bepusdt" && event.Status != "paid" {
+		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(response, "success")
 		return
 	}
 	disposition, err := w.app.applyVerifiedPayment(request.Context(), provider, event)

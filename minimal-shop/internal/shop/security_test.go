@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -60,7 +62,7 @@ func TestProviderAmountCentsRejectsFractions(t *testing.T) {
 		valid bool
 	}{
 		{"10", 1000, true}, {"10.00", 1000, true}, {"10.010", 1001, true},
-		{"10.001", 0, false}, {"1e2", 0, false}, {"-1", 0, false}, {"0", 0, false},
+		{"10.001", 0, false}, {"1e2", 0, false}, {"1/2", 0, false}, {"-1", 0, false}, {"0", 0, false},
 	} {
 		got, err := providerAmountCents(tc.input)
 		if (err == nil) != tc.valid || (tc.valid && got != tc.want) {
@@ -112,7 +114,7 @@ func TestBepusdtCashierOrderAndCallback(t *testing.T) {
 		if err := json.Unmarshal(body, &request); err != nil {
 			t.Errorf("invalid request JSON: %v", err)
 		}
-		if request["order_id"] != "pay-42" || request["fiat"] != "CNY" || request["currencies"] != "USDT" || request["amount"] != float64(15.01) {
+		if request["order_id"] != "pay-42" || request["fiat"] != "CNY" || request["currencies"] != "USDT" || request["amount"] != float64(15.01) || request["timeout"] != float64(1800) {
 			t.Errorf("wrong cashier request facts: %v", request)
 		}
 		if request["signature"] != bepSignature(request, "test-bep-token-12345678") {
@@ -141,6 +143,37 @@ func TestBepusdtCashierOrderAndCallback(t *testing.T) {
 	if _, err := g.Verify(context.Background(), nil, body); err == nil {
 		t.Fatal("tampered cashier amount passed verification")
 	}
+	callback["amount"] = 15.01
+	callback["actual_amount"] = 0.0
+	callback["status"] = 1
+	callback["signature"] = bepSignature(callback, g.Token)
+	body, _ = json.Marshal(callback)
+	if event, err := g.Verify(context.Background(), nil, body); err != nil || event.Status != "waiting" {
+		t.Fatalf("signed waiting notification rejected: %+v %v", event, err)
+	}
+	callback["status"] = 2
+	callback["signature"] = bepSignature(callback, g.Token)
+	body, _ = json.Marshal(callback)
+	if _, err := g.Verify(context.Background(), nil, body); err == nil {
+		t.Fatal("paid notification with zero actual amount accepted")
+	}
+}
+
+func TestBepusdtWaitingCallbackIsAcknowledgedWithoutDelivery(t *testing.T) {
+	g := BepGateway{Token: "test-bep-token-12345678"}
+	callback := map[string]any{"trade_id": "trade-waiting", "order_id": "order-waiting", "amount": 15.01,
+		"actual_amount": 0.0, "token": "", "block_transaction_id": "", "status": 1}
+	callback["signature"] = bepSignature(callback, g.Token)
+	body, _ := json.Marshal(callback)
+	app := &App{gateways: map[string]Gateway{"bepusdt": g}}
+	handler := NewWeb(app, Config{AppURL: "https://shop.example.test", Environment: "production", PaymentMode: "live"},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	request := httptest.NewRequest(http.MethodPost, "https://shop.example.test/webhooks/bepusdt", strings.NewReader(string(body)))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "success" {
+		t.Fatalf("waiting notification was not acknowledged: %d %q", response.Code, response.Body.String())
+	}
 }
 
 func TestProductionRejectsMockAndHTTP(t *testing.T) {
@@ -165,6 +198,22 @@ func TestProductionRejectsMockAndHTTP(t *testing.T) {
 	t.Setenv("SHOP_BEPUSDT_URL", "https://pay.example.test")
 	if _, err := LoadConfig(); err != nil {
 		t.Fatalf("valid production configuration rejected: %v", err)
+	}
+}
+
+func TestMockRejectsPublicAppURL(t *testing.T) {
+	t.Setenv("SHOP_DATABASE_URL", "postgres://test:test@localhost/shop_test")
+	t.Setenv("SHOP_CARD_KEY_HEX", strings.Repeat("ab", 32))
+	t.Setenv("SHOP_MOCK_KEY_HEX", strings.Repeat("cd", 32))
+	t.Setenv("SHOP_ENV", "development")
+	t.Setenv("SHOP_PAYMENT_MODE", "mock")
+	t.Setenv("SHOP_APP_URL", "https://shop.example.test")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("public mock payment site accepted")
+	}
+	t.Setenv("SHOP_APP_URL", "http://localhost:18080")
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("local mock site rejected: %v", err)
 	}
 }
 
@@ -202,5 +251,41 @@ func TestLoginLimiterBlocksRepeatedAttempts(t *testing.T) {
 	}
 	if limiter.allow(key, 10, 15*time.Minute) {
 		t.Fatal("repeated login was not rate limited")
+	}
+}
+
+func TestClientIPOnlyTrustsConfiguredProxy(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/login", nil)
+	request.RemoteAddr = "172.20.0.1:3456"
+	request.Header.Set("X-Real-IP", "203.0.113.7")
+	if got := clientIP(request, nil); got != "172.20.0.1" {
+		t.Fatalf("untrusted proxy spoofed client IP: %s", got)
+	}
+	_, proxy, err := net.ParseCIDR("172.20.0.1/32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := clientIP(request, []net.IPNet{*proxy}); got != "203.0.113.7" {
+		t.Fatalf("trusted proxy client IP was ignored: %s", got)
+	}
+	request.Header.Set("X-Real-IP", "invalid")
+	if got := clientIP(request, []net.IPNet{*proxy}); got != "172.20.0.1" {
+		t.Fatalf("invalid forwarded IP was trusted: %s", got)
+	}
+}
+
+func TestLiveModeHidesMockPaymentPage(t *testing.T) {
+	w := Web{cfg: Config{PaymentMode: "live"}}
+	recorder := httptest.NewRecorder()
+	w.mockPayPage(recorder, httptest.NewRequest(http.MethodGet, "/mock/pay/fake", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("mock payment page exposed in live mode: %d", recorder.Code)
+	}
+}
+
+func TestProductionSessionCookieIsHostBound(t *testing.T) {
+	w := Web{cfg: Config{Environment: "production", AppURL: "https://shop.example.test"}}
+	if w.sessionCookieName() != "__Host-shop_session" || !w.secureCookies() {
+		t.Fatal("production session cookie lacks host binding or Secure flag")
 	}
 }

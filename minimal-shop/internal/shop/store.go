@@ -19,6 +19,7 @@ var (
 	ErrForbidden         = errors.New("forbidden")
 	ErrInvalid           = errors.New("invalid request")
 	ErrOutOfStock        = errors.New("out of stock")
+	ErrOrderLimit        = errors.New("too many pending orders")
 	ErrOrderClosed       = errors.New("order closed")
 	ErrPaymentProcessing = errors.New("payment is being created")
 	ErrPaymentReview     = errors.New("payment requires manual review")
@@ -93,6 +94,12 @@ func (a *App) Migrate(ctx context.Context) error {
 		if _, err = tx.Exec(ctx, `INSERT INTO schema_migrations (version) VALUES (1)`); err != nil {
 			return err
 		}
+	}
+	if _, err = tx.Exec(ctx, `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO schema_migrations (version) VALUES (2) ON CONFLICT (version) DO NOTHING`); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

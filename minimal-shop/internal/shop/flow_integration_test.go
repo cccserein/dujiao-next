@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func TestPurchaseFlow(t *testing.T) {
 	if err != nil || strings.TrimPrefix(parsed.Path, "/") != "shop_test" {
 		t.Fatal("SHOP_TEST_DATABASE_URL must name the disposable shop_test database")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	maintenance, err := pgx.Connect(ctx, dsn)
 	if err != nil {
@@ -88,8 +89,18 @@ func TestPurchaseFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	code := totpCode([]byte("12345678901234567890"), time.Now().Unix()/30)
-	if _, _, err := app.Login(ctx, admin.Email, "admin-password-12345", code); err != nil {
+	adminToken, _, err := app.Login(ctx, admin.Email, "admin-password-12345", code)
+	if err != nil {
 		t.Fatalf("admin TOTP login failed: %v", err)
+	}
+	if _, err := app.SessionUser(ctx, adminToken); err != nil {
+		t.Fatalf("fresh admin session denied: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET last_seen_at=now()-interval '31 minutes' WHERE user_id=$1`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.SessionUser(ctx, adminToken); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("idle admin session accepted: %v", err)
 	}
 	if _, _, err := app.Login(ctx, admin.Email, "admin-password-12345", code); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("replayed admin TOTP accepted: %v", err)
@@ -101,6 +112,9 @@ func TestPurchaseFlow(t *testing.T) {
 	other, err := app.CreateUser(ctx, "other@example.test", "other-password-12345", "customer")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := app.CreateProduct(ctx, buyer.ID, "forged admin", "", 100); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("customer created product through service: %v", err)
 	}
 	if err := app.CreateProduct(ctx, admin.ID, "测试商品", "仅供丢弃的假卡密", 1501); err != nil {
 		t.Fatal(err)
@@ -202,7 +216,7 @@ func TestPurchaseFlow(t *testing.T) {
 	defer server.Close()
 	mock.AppURL = server.URL
 	app.gateways["mock"] = mock
-	handler = NewWeb(app, Config{AppURL: server.URL, Environment: "development"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler = NewWeb(app, Config{AppURL: server.URL, Environment: "development", PaymentMode: "mock"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -265,6 +279,189 @@ func TestPurchaseFlow(t *testing.T) {
 	if afterPage.StatusCode != http.StatusOK || !strings.Contains(string(afterBody), "FAKE-CARD-C") {
 		t.Fatal("browser did not receive the paid card")
 	}
+	forbiddenAdmin := post("/admin/products", url.Values{"title": {"unauthorized"}, "price": {"1.00"}})
+	forbiddenAdmin.Body.Close()
+	if forbiddenAdmin.StatusCode != http.StatusForbidden {
+		t.Fatalf("customer modified admin catalog: %d", forbiddenAdmin.StatusCode)
+	}
+	stolenPage, err := client.Get(server.URL + fmt.Sprintf("/orders/%d", orderID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stolenPage.Body.Close()
+	if stolenPage.StatusCode != http.StatusNotFound {
+		t.Fatalf("another customer's order was visible: %d", stolenPage.StatusCode)
+	}
+	foreignRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/orders", strings.NewReader(url.Values{"product_id": {fmt.Sprint(productID)}}.Encode()))
+	foreignRequest.Header.Set("Origin", "https://attacker.example.test")
+	foreignRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	foreignResponse, err := client.Do(foreignRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignResponse.Body.Close()
+	if foreignResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin order request accepted: %d", foreignResponse.StatusCode)
+	}
+	createStockProduct := func(title, card string) int64 {
+		t.Helper()
+		if err := app.CreateProduct(ctx, admin.ID, title, "test only", 100); err != nil {
+			t.Fatal(err)
+		}
+		listed, err := app.ListProducts(ctx, true)
+		if err != nil || len(listed) == 0 {
+			t.Fatal(err)
+		}
+		id := listed[0].ID
+		if count, err := app.ImportCards(ctx, admin.ID, id, []string{card}); err != nil || count != 1 {
+			t.Fatalf("test card import: %d %v", count, err)
+		}
+		if err := app.SetProductActive(ctx, admin.ID, id, true); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	xss := `<script>alert("xss")</script>`
+	xssProduct := createStockProduct(xss, xss)
+	homePage, err := client.Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeBody, _ := io.ReadAll(homePage.Body)
+	homePage.Body.Close()
+	if strings.Contains(string(homeBody), xss) || !strings.Contains(string(homeBody), "&lt;script&gt;") {
+		t.Fatal("product title was not HTML-escaped")
+	}
+	xssOrder, err := app.CreateOrder(ctx, buyer.ID, xssProduct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xssCheckout, err := app.CreatePayment(ctx, buyer.ID, xssOrder, "mock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	xssEvent := PaymentEvent{EventID: "event-http-xss", PaymentID: xssCheckout.PaymentID, ProviderOrderID: xssCheckout.PaymentID,
+		ProviderRef: xssCheckout.PaymentID, AmountCents: 100, Currency: "CNY", Status: "paid"}
+	callbackBody, _ := json.Marshal(xssEvent)
+	unsignedResponse, err := client.Post(server.URL+"/webhooks/mock", "application/json", strings.NewReader(string(callbackBody)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsignedResponse.Body.Close()
+	if unsignedResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unsigned callback accepted: %d", unsignedResponse.StatusCode)
+	}
+	xssBefore, err := app.GetOrder(ctx, buyer, xssOrder)
+	if err != nil || xssBefore.Card != "" {
+		t.Fatal("unsigned callback released card")
+	}
+	signedRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/webhooks/mock", strings.NewReader(string(callbackBody)))
+	signedRequest.Header.Set("X-Shop-Signature", mock.Sign(callbackBody))
+	signedResponse, err := client.Do(signedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedResponse.Body.Close()
+	if signedResponse.StatusCode != http.StatusOK {
+		t.Fatalf("valid callback failed: %d", signedResponse.StatusCode)
+	}
+	xssPage, err := app.GetOrder(ctx, buyer, xssOrder)
+	if err != nil || xssPage.Card != xss {
+		t.Fatalf("valid callback did not deliver: %v", err)
+	}
+	stockProduct := createStockProduct("single-card", "ONE-FAKE-CARD")
+	var purchaseErr [2]error
+	var purchaseID [2]int64
+	var group sync.WaitGroup
+	for i, userID := range []int64{buyer.ID, other.ID} {
+		group.Add(1)
+		go func(index int, buyerID int64) {
+			defer group.Done()
+			purchaseID[index], purchaseErr[index] = app.CreateOrder(ctx, buyerID, stockProduct)
+		}(i, userID)
+	}
+	group.Wait()
+	successes, outOfStock := 0, 0
+	for i := range purchaseErr {
+		if purchaseErr[i] == nil && purchaseID[i] > 0 {
+			successes++
+		} else if errors.Is(purchaseErr[i], ErrOutOfStock) {
+			outOfStock++
+		} else {
+			t.Fatalf("unexpected concurrent order result: id=%d err=%v", purchaseID[i], purchaseErr[i])
+		}
+	}
+	if successes != 1 || outOfStock != 1 {
+		t.Fatalf("single card oversold: successes=%d out-of-stock=%d", successes, outOfStock)
+	}
+	switchProduct := createStockProduct("switch-channel", "SWITCH-FAKE-CARD")
+	switchOrder, err := app.CreateOrder(ctx, buyer.ID, switchProduct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPayment, err := app.CreatePayment(ctx, buyer.ID, switchOrder, "mock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.gateways["mock2"] = testRedirectGateway{MockGateway: mock}
+	secondPayment, err := app.CreatePayment(ctx, buyer.ID, switchOrder, "mock2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldEvent := signedMockEvent(t, mock, PaymentEvent{EventID: "event-old-channel", PaymentID: firstPayment.PaymentID,
+		ProviderOrderID: firstPayment.PaymentID, ProviderRef: firstPayment.PaymentID, AmountCents: 100, Currency: "CNY", Status: "paid"})
+	if result, err := app.applyVerifiedPayment(ctx, "mock", oldEvent); err != nil || result != "review" {
+		t.Fatalf("old payment delivered after switch: %s %v", result, err)
+	}
+	switchBefore, err := app.GetOrder(ctx, buyer, switchOrder)
+	if err != nil || switchBefore.Card != "" {
+		t.Fatal("old payment callback exposed card")
+	}
+	newEvent := signedMockEvent(t, mock, PaymentEvent{EventID: "event-new-channel", PaymentID: secondPayment.PaymentID,
+		ProviderOrderID: secondPayment.PaymentID, ProviderRef: secondPayment.PaymentID, AmountCents: 100, Currency: "CNY", Status: "paid"})
+	if result, err := app.applyVerifiedPayment(ctx, "mock2", newEvent); err != nil || result != "delivered" {
+		t.Fatalf("new payment did not deliver: %s %v", result, err)
+	}
+	bepProduct := createStockProduct("bep-callback", "BEP-FAKE-CARD")
+	bepOrder, err := app.CreateOrder(ctx, buyer.ID, bepProduct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.gateways["bepusdt"] = testRedirectGateway{MockGateway: mock}
+	bepCheckout, err := app.CreatePayment(ctx, buyer.ID, bepOrder, "bepusdt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bepEvent := PaymentEvent{EventID: "event-bep-ack", PaymentID: bepCheckout.PaymentID, ProviderOrderID: bepCheckout.PaymentID,
+		ProviderRef: bepCheckout.PaymentID, AmountCents: 100, Currency: "CNY", Status: "paid"}
+	bepBody, _ := json.Marshal(bepEvent)
+	bepRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/webhooks/bepusdt", strings.NewReader(string(bepBody)))
+	bepRequest.Header.Set("X-Shop-Signature", mock.Sign(bepBody))
+	bepResponse, err := client.Do(bepRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bepAck, _ := io.ReadAll(bepResponse.Body)
+	bepResponse.Body.Close()
+	if bepResponse.StatusCode != http.StatusOK || string(bepAck) != "success" {
+		t.Fatalf("BEPUSDT success was not acknowledged: code=%d body=%q", bepResponse.StatusCode, bepAck)
+	}
+	limitProduct := createStockProduct("pending-limit", "PENDING-FAKE-1")
+	if inserted, err := app.ImportCards(ctx, admin.ID, limitProduct, []string{"PENDING-FAKE-2", "PENDING-FAKE-3", "PENDING-FAKE-4"}); err != nil || inserted != 3 {
+		t.Fatalf("pending limit setup failed: %d %v", inserted, err)
+	}
+	limitedUser, err := app.CreateUser(ctx, "pending-limit@example.test", "test-password-12345", "customer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := app.CreateOrder(ctx, limitedUser.ID, limitProduct); err != nil {
+			t.Fatalf("pending order %d failed: %v", i+1, err)
+		}
+	}
+	if _, err := app.CreateOrder(ctx, limitedUser.ID, limitProduct); !errors.Is(err, ErrOrderLimit) {
+		t.Fatalf("unpaid inventory was not limited: %v", err)
+	}
 }
 
 func signedMockEvent(t *testing.T, mock MockGateway, event PaymentEvent) PaymentEvent {
@@ -278,4 +475,10 @@ func signedMockEvent(t *testing.T, mock MockGateway, event PaymentEvent) Payment
 		t.Fatal(err)
 	}
 	return verified
+}
+
+type testRedirectGateway struct{ MockGateway }
+
+func (g testRedirectGateway) Start(_ context.Context, p PaymentStart) (PaymentStartResult, error) {
+	return PaymentStartResult{URL: "https://pay.example.test/checkout/" + p.PaymentID, ProviderRef: p.PaymentID}, nil
 }

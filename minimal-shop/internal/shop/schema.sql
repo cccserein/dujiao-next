@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     token_hash BYTEA PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions (expires_at);

@@ -8,8 +8,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 )
+
+func requireAdminTx(ctx context.Context, tx pgx.Tx, adminID int64) error {
+	var role string
+	if err := tx.QueryRow(ctx, `SELECT role FROM users WHERE id=$1`, adminID).Scan(&role); err != nil || role != "admin" {
+		return ErrForbidden
+	}
+	return nil
+}
 
 func cleanEmail(raw string) (string, error) {
 	email := strings.ToLower(strings.TrimSpace(raw))
@@ -87,7 +96,10 @@ func (a *App) SessionUser(ctx context.Context, rawToken string) (User, error) {
 	if err != nil {
 		return user, ErrForbidden
 	}
-	err = a.db.QueryRow(ctx, `SELECT u.id,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now()`, digest[:]).Scan(&user.ID, &user.Email, &user.Role)
+	err = a.db.QueryRow(ctx, `UPDATE sessions s SET last_seen_at=now() FROM users u
+		WHERE s.token_hash=$1 AND s.user_id=u.id AND s.expires_at>now()
+		AND (u.role<>'admin' OR s.last_seen_at>now()-interval '30 minutes')
+		RETURNING u.id,u.email,u.role`, digest[:]).Scan(&user.ID, &user.Email, &user.Role)
 	if err != nil {
 		return User{}, ErrForbidden
 	}
@@ -135,6 +147,9 @@ func (a *App) CreateProduct(ctx context.Context, adminID int64, title, descripti
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := requireAdminTx(ctx, tx, adminID); err != nil {
+		return err
+	}
 	var id int64
 	if err = tx.QueryRow(ctx, `INSERT INTO products (title,description,price_cents,currency,active) VALUES ($1,$2,$3,'CNY',false) RETURNING id`, title, description, priceCents).Scan(&id); err != nil {
 		return err
@@ -154,6 +169,9 @@ func (a *App) SetProductActive(ctx context.Context, adminID, productID int64, ac
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := requireAdminTx(ctx, tx, adminID); err != nil {
+		return err
+	}
 	result, err := tx.Exec(ctx, `UPDATE products SET active=$1,updated_at=now() WHERE id=$2`, active, productID)
 	if err != nil || result.RowsAffected() != 1 {
 		return ErrNotFound
@@ -173,6 +191,9 @@ func (a *App) ImportCards(ctx context.Context, adminID, productID int64, lines [
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if err := requireAdminTx(ctx, tx, adminID); err != nil {
+		return 0, err
+	}
 	var exists bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM products WHERE id=$1)`, productID).Scan(&exists); err != nil || !exists {
 		return 0, ErrNotFound

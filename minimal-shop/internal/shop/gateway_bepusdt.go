@@ -41,6 +41,7 @@ func (g BepGateway) Start(ctx context.Context, p PaymentStart) (PaymentStartResu
 		"fiat":         "CNY",
 		"currencies":   g.Currencies,
 		"name":         fmt.Sprintf("订单 %d", p.OrderID),
+		"timeout":      int(orderLifetime / time.Second),
 	}
 	params["signature"] = bepSignature(params, g.Token)
 	body, err := json.Marshal(params)
@@ -108,7 +109,8 @@ func (g BepGateway) Verify(_ context.Context, _ http.Header, body []byte) (Payme
 		return event, ErrInvalid
 	}
 	var callback bepCallback
-	if err := json.Unmarshal(body, &callback); err != nil || callback.TradeID == "" || callback.OrderID == "" || callback.Status != 2 {
+	if err := json.Unmarshal(body, &callback); err != nil || callback.TradeID == "" || callback.OrderID == "" ||
+		(callback.Status != 1 && callback.Status != 2 && callback.Status != 3) {
 		return event, ErrInvalid
 	}
 	amountFloat, amountText, err := bepNumber(callback.Amount)
@@ -116,7 +118,7 @@ func (g BepGateway) Verify(_ context.Context, _ http.Header, body []byte) (Payme
 		return event, ErrInvalid
 	}
 	actualFloat, _, err := bepNumber(callback.ActualAmount)
-	if err != nil {
+	if err != nil || (callback.Status == 2 && actualFloat <= 0) {
 		return event, ErrInvalid
 	}
 	fields := map[string]any{
@@ -140,8 +142,9 @@ func (g BepGateway) Verify(_ context.Context, _ http.Header, body []byte) (Payme
 	if err != nil {
 		return event, ErrInvalid
 	}
+	status := map[int]string{1: "waiting", 2: "paid", 3: "expired"}[callback.Status]
 	return PaymentEvent{EventID: callback.TradeID, PaymentID: callback.OrderID, ProviderOrderID: callback.OrderID,
-		ProviderRef: callback.TradeID, AmountCents: cents, Currency: "CNY", Status: "paid"}, nil
+		ProviderRef: callback.TradeID, AmountCents: cents, Currency: "CNY", Status: status}, nil
 }
 
 func bepNumber(raw json.RawMessage) (float64, string, error) {

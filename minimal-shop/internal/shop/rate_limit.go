@@ -55,7 +55,7 @@ func accountLimitKey(email string) string {
 	return "login:" + hex.EncodeToString(digest[:])
 }
 
-func clientIP(r *http.Request) string {
+func clientIP(r *http.Request, trustedProxies []net.IPNet) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -64,7 +64,14 @@ func clientIP(r *http.Request) string {
 	if ip == nil {
 		return "unknown"
 	}
-	if ip.IsLoopback() {
+	trusted := ip.IsLoopback()
+	for _, network := range trustedProxies {
+		if network.Contains(ip) {
+			trusted = true
+			break
+		}
+	}
+	if trusted {
 		if real := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); real != nil {
 			return real.String()
 		}
