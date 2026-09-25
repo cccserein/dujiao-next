@@ -10,7 +10,7 @@ app:
 server:
   host: 0.0.0.0
   port: 8080
-  mode: debug  # debug 或 release
+  mode: release  # 生产使用 release；仅本地排查时改为 debug
   # 仅信任实际反向代理的地址或网段。留空表示完全不信任转发头、直接使用 TCP 来源地址。
   # 同机 Nginx 使用下面默认值；Docker/CDN 部署必须改成真实代理网段，禁止配置 0.0.0.0/0 或 ::/0。
   trusted_proxies:
