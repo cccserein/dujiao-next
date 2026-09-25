@@ -214,7 +214,7 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			return ErrPaymentCreateFailed
 		}
 		if existing != nil && hasProviderResult(existing) && existing.Currency == paymentCurrency &&
-			paymentCoveredOrderAmount(existing).Equal(onlineAmount) {
+			paymentCoveredOrderAmount(existing, decimal.Zero).Equal(onlineAmount) {
 			legacyFeePayment := existing.FeeAmount.Decimal.IsPositive() &&
 				(existing.FeePolicy == "" || existing.FeePolicy == constants.PaymentFeePolicyLegacyCustomerSurcharge)
 			if (legacyFeePayment && feeConfig.ReuseLegacyOrderFeePayment) ||
