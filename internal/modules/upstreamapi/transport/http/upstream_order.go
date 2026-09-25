@@ -245,11 +245,14 @@ func (h *Handler) GetOrder(c *gin.Context) {
 		"refund_records":  localRefundRecords,
 	}
 
-	// 若已交付，返回交付信息（优先使用订单自身的 fulfillment，否则从子订单获取）
+	// Return delivery content only while the order retains an entitlement.
 	sourceFulfillment := order.Fulfillment
-	if sourceFulfillment == nil && len(order.Children) > 0 {
+	if !order.CanReadFulfillment() {
+		sourceFulfillment = nil
+	}
+	if sourceFulfillment == nil && order.CanReadFulfillment() && len(order.Children) > 0 {
 		for i := range order.Children {
-			if order.Children[i].Fulfillment != nil {
+			if order.Children[i].CanReadFulfillment() && order.Children[i].Fulfillment != nil {
 				sourceFulfillment = order.Children[i].Fulfillment
 				break
 			}
@@ -284,6 +287,7 @@ func (h *Handler) GetOrder(c *gin.Context) {
 		resp["items"] = items
 	}
 
+	c.Header("Cache-Control", "no-store")
 	successResponse(c, resp)
 }
 

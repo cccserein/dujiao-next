@@ -72,6 +72,7 @@ func (h *Handler) GetOrderStatus(c *gin.Context) {
 
 	order.MaskUpstreamFulfillmentType()
 	order.StripCostPrice()
+	c.Header("Cache-Control", "no-store")
 	respondChannelSuccess(c, buildChannelOrderDetailResponse(order, channelLocaleValue(c, c.Query("locale"))))
 }
 
@@ -112,6 +113,7 @@ func (h *Handler) GetOrderByOrderNo(c *gin.Context) {
 
 	order.MaskUpstreamFulfillmentType()
 	order.StripCostPrice()
+	c.Header("Cache-Control", "no-store")
 	respondChannelSuccess(c, buildChannelOrderDetailResponse(order, channelLocaleValue(c, c.Query("locale"))))
 }
 
@@ -269,7 +271,7 @@ func buildChannelOrderDetailResponse(order *orderdomain.Order, locale string) gi
 		"cancelled_at":       order.CanceledAt,
 	}
 
-	orderPaid := order.PaidAt != nil
+	orderPaid := order.CanReadFulfillment()
 	items := make([]gin.H, 0, len(order.Items))
 	for _, item := range order.Items {
 		instructions := ""
@@ -306,7 +308,7 @@ func buildChannelOrderDetailResponse(order *orderdomain.Order, locale string) gi
 			"order_no": child.OrderNo,
 			"status":   child.Status,
 		}
-		if child.Fulfillment != nil {
+		if orderPaid && child.CanReadFulfillment() && child.Fulfillment != nil {
 			childResp["fulfillment"] = gin.H{
 				"status":       child.Fulfillment.Status,
 				"type":         child.Fulfillment.Type,
@@ -325,7 +327,7 @@ func buildChannelOrderDetailResponse(order *orderdomain.Order, locale string) gi
 	if orderPaid {
 		parentInstructions = joinLocalizedInstructions(order.Items, locale)
 	}
-	if order.Fulfillment != nil {
+	if orderPaid && order.Fulfillment != nil {
 		resp["fulfillment_status"] = order.Fulfillment.Status
 		resp["fulfillment_result"] = order.Fulfillment.Payload
 		resp["fulfillment_delivered_at"] = order.Fulfillment.DeliveredAt

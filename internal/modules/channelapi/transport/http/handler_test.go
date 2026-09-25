@@ -229,6 +229,25 @@ func TestBuildChannelOrderDetailResponseUsesTotalPaidAmount(t *testing.T) {
 	}
 }
 
+func TestBuildChannelOrderDetailResponseHidesRefundedDelivery(t *testing.T) {
+	order := &orderdomain.Order{
+		Status:      "refunded",
+		Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-CARD"},
+		Children: []orderdomain.Order{{
+			Status:      "delivered",
+			Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "CHILD-FAKE-CARD"},
+		}},
+	}
+	resp := buildChannelOrderDetailResponse(order, "zh-CN")
+	if resp["fulfillment_result"] != nil {
+		t.Fatal("refunded parent delivery content was exposed")
+	}
+	children := resp["children"].([]gin.H)
+	if children[0]["fulfillment"] != nil {
+		t.Fatal("refunded parent exposed child delivery content")
+	}
+}
+
 func TestBuildChannelPaymentResponseIncludesOrderSummary(t *testing.T) {
 	now := time.Date(2026, 3, 10, 12, 30, 0, 0, time.UTC)
 	order := &orderdomain.Order{
