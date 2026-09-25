@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: ${SHOP_DB_PASSWORD:?set SHOP_DB_PASSWORD}
+    volumes:
+      - shop_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [private]
+
+  migrate:
+    build: .
+    command: ["migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment: &shop_env
+      SHOP_DATABASE_URL: postgres://shop:${SHOP_DB_PASSWORD}@db:5432/shop?sslmode=disable
+      SHOP_CARD_KEY_HEX: ${SHOP_CARD_KEY_HEX:?set SHOP_CARD_KEY_HEX}
+      SHOP_APP_URL: ${SHOP_APP_URL:?set SHOP_APP_URL}
+      SHOP_LISTEN_ADDR: 0.0.0.0:8080
+      SHOP_ENV: ${SHOP_ENV:?set SHOP_ENV}
+      SHOP_PAYMENT_MODE: ${SHOP_PAYMENT_MODE:?set SHOP_PAYMENT_MODE}
+      SHOP_MOCK_KEY_HEX: ${SHOP_MOCK_KEY_HEX:-}
+      SHOP_EPAY_URL: ${SHOP_EPAY_URL:-}
+      SHOP_EPAY_MERCHANT_ID: ${SHOP_EPAY_MERCHANT_ID:-}
+      SHOP_EPAY_KEY: ${SHOP_EPAY_KEY:-}
+      SHOP_BEPUSDT_URL: ${SHOP_BEPUSDT_URL:-}
+      SHOP_BEPUSDT_TOKEN: ${SHOP_BEPUSDT_TOKEN:-}
+      SHOP_BEPUSDT_CURRENCIES: ${SHOP_BEPUSDT_CURRENCIES:-USDT}
+    networks: [private]
+
+  shop:
+    build: .
+    command: ["serve"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment: *shop_env
+    ports:
+      - "127.0.0.1:18080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks: [private, edge]
+
+networks:
+  private:
+    internal: true
+  edge: {}
+
+volumes:
+  shop_data:
