@@ -288,6 +288,7 @@ func (h *AdminHandler) GetCardSecrets(c *gin.Context) {
 	}
 
 	pagination := response.BuildPagination(page, pageSize, total)
+	c.Header("Cache-Control", "no-store")
 	response.SuccessWithPage(c, items, pagination)
 }
 
@@ -333,6 +334,7 @@ func (h *AdminHandler) UpdateCardSecret(c *gin.Context) {
 		return
 	}
 
+	c.Header("Cache-Control", "no-store")
 	response.Success(c, item)
 }
 
@@ -417,6 +419,7 @@ func (h *AdminHandler) ExportCardSecrets(c *gin.Context) {
 	filename := "card-secrets-" + time.Now().Format("20060102-150405") + "." + normalizedFormat
 	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	c.Header("Cache-Control", "no-store")
 	c.Data(200, contentType, content)
 }
 
@@ -460,6 +463,7 @@ func (h *AdminHandler) ExportAvailableCardSecrets(c *gin.Context) {
 	filename := "card-secrets-available-" + time.Now().Format("20060102-150405") + "." + normalizedFormat
 	c.Header("Content-Type", result.ContentType)
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	c.Header("Cache-Control", "no-store")
 	c.Header("X-Exported-Count", strconv.Itoa(result.Count))
 	c.Data(200, result.ContentType, result.Content)
 }

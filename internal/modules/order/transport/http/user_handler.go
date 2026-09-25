@@ -418,6 +418,7 @@ func respondFulfillmentDownload(c *gin.Context, order *orderdomain.Order) {
 	filename := "fulfillment-" + order.OrderNo + ".txt"
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	c.Header("Cache-Control", "no-store")
 	c.Data(200, "text/plain; charset=utf-8", []byte(payload))
 }
 

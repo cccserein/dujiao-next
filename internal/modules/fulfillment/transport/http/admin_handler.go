@@ -39,20 +39,28 @@ type AdminOrderReader interface {
 	GetOrderForAdmin(orderID uint) (*orderdomain.Order, error)
 }
 
-// AdminHandler 处理后台交付相关 HTTP 请求。
-type AdminHandler struct {
-	creator ManualCreator
-	orders  AdminOrderReader
+type AdminSecretAuthorizer interface {
+	EnforceAdmin(adminID uint, object, action string) (bool, error)
 }
 
-func NewAdminHandler(creator ManualCreator, orders AdminOrderReader) *AdminHandler {
+// AdminHandler 处理后台交付相关 HTTP 请求。
+type AdminHandler struct {
+	creator    ManualCreator
+	orders     AdminOrderReader
+	authorizer AdminSecretAuthorizer
+}
+
+func NewAdminHandler(creator ManualCreator, orders AdminOrderReader, authorizer AdminSecretAuthorizer) *AdminHandler {
 	if creator == nil {
 		panic("fulfillment admin handler: creator is nil")
 	}
 	if orders == nil {
 		panic("fulfillment admin handler: orders is nil")
 	}
-	return &AdminHandler{creator: creator, orders: orders}
+	if authorizer == nil {
+		panic("fulfillment admin handler: authorizer is nil")
+	}
+	return &AdminHandler{creator: creator, orders: orders, authorizer: authorizer}
 }
 
 // AdminCreateFulfillmentRequest 管理端录入交付请求。
@@ -102,6 +110,23 @@ func (h *AdminHandler) AdminCreateFulfillment(c *gin.Context) {
 
 // AdminDownloadFulfillment 管理端下载订单交付内容。
 func (h *AdminHandler) AdminDownloadFulfillment(c *gin.Context) {
+	adminID, ok := ginutil.GetAdminID(c)
+	if !ok {
+		return
+	}
+	canReadSecrets := ginutil.IsSuperAdmin(c)
+	if !canReadSecrets {
+		var authErr error
+		canReadSecrets, authErr = h.authorizer.EnforceAdmin(adminID, "/admin/card-secrets", "GET")
+		if authErr != nil {
+			ginutil.RespondError(c, response.CodeInternal, "error.order_fetch_failed", authErr)
+			return
+		}
+	}
+	if !canReadSecrets {
+		ginutil.RespondError(c, response.CodeForbidden, "error.forbidden", nil)
+		return
+	}
 	orderID, err := ginutil.ParseParamUint(c, "id")
 	if err != nil {
 		ginutil.RespondError(c, response.CodeBadRequest, "error.order_item_invalid", nil)
@@ -120,6 +145,7 @@ func (h *AdminHandler) AdminDownloadFulfillment(c *gin.Context) {
 	filename := "fulfillment-" + order.OrderNo + ".txt"
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	c.Header("Cache-Control", "no-store")
 	c.Data(200, "text/plain; charset=utf-8", []byte(payload))
 }
 

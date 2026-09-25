@@ -69,6 +69,12 @@ func (s *Service) SaveFileWithMeta(file *multipart.FileHeader, scene string) (*c
 
 	// 获取文件扩展名
 	ext := strings.ToLower(filepath.Ext(file.Filename))
+	// Uploads are served from the same origin as the admin UI. Never persist
+	// browser-executable documents, even when a scene bypasses image policy.
+	switch ext {
+	case ".svg", ".html", ".htm", ".xhtml", ".xml", ".js", ".mjs":
+		return nil, newUploadValidationError("文件类型不被允许: %s", ext)
+	}
 	if normalizedScene != "telegram" && len(s.policy.AllowedExtensions) > 0 {
 		if ext == "" || !isAllowedExtension(ext, s.policy.AllowedExtensions) {
 			return nil, newUploadValidationError("文件扩展名不被允许: %s", ext)
@@ -93,6 +99,9 @@ func (s *Service) SaveFileWithMeta(file *multipart.FileHeader, scene string) (*c
 	}
 
 	contentType := http.DetectContentType(buffer)
+	if isSVGContent(buffer) || strings.EqualFold(contentType, "text/html; charset=utf-8") {
+		return nil, newUploadValidationError("文件内容不被允许")
+	}
 	// http.DetectContentType 无法识别 SVG，需根据扩展名和内容特征补充判断
 	if ext == ".svg" && isSVGContent(buffer) {
 		contentType = "image/svg+xml"

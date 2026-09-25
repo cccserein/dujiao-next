@@ -56,6 +56,7 @@ func BuiltinRoleSeeds() []RoleSeed {
 				{Object: "/admin/promotions", Action: "*"},
 				{Object: "/admin/promotions/:id", Action: "*"},
 				{Object: "/admin/card-secrets", Action: "*"},
+				{Object: "/admin/orders/:id/fulfillment/download", Action: "GET"},
 				{Object: "/admin/card-secrets/:id", Action: "*"},
 				{Object: "/admin/card-secrets/batch", Action: "POST"},
 				{Object: "/admin/card-secrets/import", Action: "POST"},
@@ -100,7 +101,6 @@ func BuiltinRoleSeeds() []RoleSeed {
 			Policies: []Policy{
 				{Object: "/admin/orders", Action: "GET"},
 				{Object: "/admin/orders/:id", Action: "GET"},
-				{Object: "/admin/orders/:id/fulfillment/download", Action: "GET"},
 				{Object: "/admin/order-refunds", Action: "GET"},
 				{Object: "/admin/order-refunds/:id", Action: "GET"},
 				{Object: "/admin/fulfillments", Action: "POST"},

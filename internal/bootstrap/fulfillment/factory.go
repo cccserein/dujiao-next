@@ -9,5 +9,6 @@ func NewAdminHandler(c *container.Container) *fulfillmenttransport.AdminHandler 
 	return fulfillmenttransport.NewAdminHandler(
 		fulfillmentManualCreatorAdapter{svc: c.FulfillmentService},
 		fulfillmentAdminOrderAdapter{orders: c.OrderService},
+		c.AuthzService,
 	)
 }

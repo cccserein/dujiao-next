@@ -235,6 +235,7 @@ func (h *AdminRefundHandler) AdminRefundOrderToWallet(c *gin.Context) {
 		return
 	}
 	h.enqueueOrderRefundStatusEmail(order, refundRecord)
+	maskOrderFulfillment(order)
 
 	response.Success(c, gin.H{
 		"order":       order,
@@ -285,6 +286,7 @@ func (h *AdminRefundHandler) AdminManualRefundOrder(c *gin.Context) {
 		return
 	}
 	h.enqueueOrderRefundStatusEmail(order, refundRecord)
+	maskOrderFulfillment(order)
 
 	response.Success(c, gin.H{
 		"order":         order,

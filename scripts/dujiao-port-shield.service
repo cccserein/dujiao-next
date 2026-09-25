@@ -1,0 +1,14 @@
+[Unit]
+Description=Block public access to Dujiao PostgreSQL and app Docker ports
+Requires=docker.service
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/sbin/iptables -C DOCKER-USER -i ens17 -p tcp --dport 5432 -j DROP 2>/dev/null || /usr/sbin/iptables -I DOCKER-USER 1 -i ens17 -p tcp --dport 5432 -j DROP'
+ExecStart=/bin/sh -c '/usr/sbin/iptables -C DOCKER-USER -i ens17 -p tcp --dport 8080 -j DROP 2>/dev/null || /usr/sbin/iptables -I DOCKER-USER 1 -i ens17 -p tcp --dport 8080 -j DROP'
+
+[Install]
+WantedBy=multi-user.target
