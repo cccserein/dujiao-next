@@ -1022,6 +1022,55 @@ func walletBalance(t *testing.T, db *gorm.DB, userID uint) string {
 	return account.Balance.StringFixed(2)
 }
 
+func TestCreatePaymentDoesNotReuseOldAmountAfterWalletRelease(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	now := time.Now()
+	user := &userdomain.User{
+		Email: "same-channel-underpaid@example.com", PasswordHash: "hash", Status: constants.UserStatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	if err := db.Create(&walletdomain.Account{
+		UserID: user.ID, Balance: money.FromDecimal(decimal.NewFromInt(5)), CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create wallet account failed: %v", err)
+	}
+	channel := createUnderpaidChannel(t, db, svc, "Same Gateway", constants.PaymentChannelTypeWechat)
+	order := createUnderpaidOrder(t, db, "DJ-SAME-CHANNEL-UNDERPAID", user.ID, 15)
+
+	partial, err := svc.CreatePayment(CreatePaymentInput{
+		OrderID: order.ID, ChannelID: channel.ID, UseBalance: true, Context: context.Background(),
+	})
+	if err != nil {
+		t.Fatalf("create mixed payment failed: %v", err)
+	}
+	if partial.Payment.Amount.StringFixed(2) != "10.00" {
+		t.Fatalf("partial payment amount = %s, want 10.00", partial.Payment.Amount.String())
+	}
+
+	full, err := svc.CreatePayment(CreatePaymentInput{
+		OrderID: order.ID, ChannelID: channel.ID, UseBalance: false, Context: context.Background(),
+	})
+	if err != nil {
+		t.Fatalf("switch same channel to full online payment failed: %v", err)
+	}
+	if full.Payment.ID == partial.Payment.ID || full.Payment.Amount.StringFixed(2) != "15.00" {
+		t.Fatalf("old 10.00 payment was reused for 15.00 order: %+v", full.Payment)
+	}
+	if full.WalletPaidAmount.StringFixed(2) != "0.00" || walletBalance(t, db, user.ID) != "5.00" {
+		t.Fatalf("wallet was not released: order=%s", full.WalletPaidAmount.String())
+	}
+	var old paymentdomain.Payment
+	if err := db.First(&old, partial.Payment.ID).Error; err != nil {
+		t.Fatalf("reload old payment failed: %v", err)
+	}
+	if old.SupersededAt == nil || old.SupersededByPaymentID == nil || *old.SupersededByPaymentID != full.Payment.ID {
+		t.Fatalf("old payment was not superseded: %+v", old)
+	}
+}
+
 // 余额 5 + 渠道 A 在线 10 混合支付后切到渠道 B，余额被退回、在线应付额抬到 15。
 // 此时旧的 A 链接在网关侧仍可支付，只付 10 不得履约整单。
 func TestSupersededPaymentUnderpaidDoesNotFulfillOrder(t *testing.T) {

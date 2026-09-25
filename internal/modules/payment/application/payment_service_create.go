@@ -137,20 +137,6 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 				return err
 			}
 
-			existing, err := paymentRepo.GetLatestPendingByOrderChannel(lockedOrder.ID, channel.ID, time.Now())
-			if err != nil {
-				return ErrPaymentCreateFailed
-			}
-			if existing != nil && hasProviderResult(existing) {
-				legacyFeePayment := existing.FeeAmount.Decimal.IsPositive() &&
-					(existing.FeePolicy == "" || existing.FeePolicy == constants.PaymentFeePolicyLegacyCustomerSurcharge)
-				if !legacyFeePayment || feeConfig.ReuseLegacyOrderFeePayment {
-					reusedPending = true
-					payment = existing
-					order = &lockedOrder
-					return nil
-				}
-			}
 		}
 
 		if s.walletSvc != nil {
@@ -219,6 +205,26 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 		}
 
 		paymentAmount, feeAmount, feePolicy := calculatePaymentAmounts(onlineAmount, feeRate, fixedFee, feeConfig.CustomerFeeEnabled)
+		paymentCurrency := lockedOrder.Currency
+		if shouldUseCNYPaymentCurrency(channel) {
+			paymentCurrency = "CNY"
+		}
+		existing, err := paymentRepo.GetLatestPendingByOrderChannel(lockedOrder.ID, channel.ID, time.Now())
+		if err != nil {
+			return ErrPaymentCreateFailed
+		}
+		if existing != nil && hasProviderResult(existing) && existing.Currency == paymentCurrency &&
+			paymentCoveredOrderAmount(existing).Equal(onlineAmount) {
+			legacyFeePayment := existing.FeeAmount.Decimal.IsPositive() &&
+				(existing.FeePolicy == "" || existing.FeePolicy == constants.PaymentFeePolicyLegacyCustomerSurcharge)
+			if (legacyFeePayment && feeConfig.ReuseLegacyOrderFeePayment) ||
+				(!legacyFeePayment && existing.Amount.Decimal.Equal(paymentAmount)) {
+				reusedPending = true
+				payment = existing
+				order = &lockedOrder
+				return nil
+			}
+		}
 		payment = &paymentdomain.Payment{
 			OrderID:         lockedOrder.ID,
 			ChannelID:       channel.ID,
@@ -230,15 +236,11 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			FixedFee:        money.FromDecimal(fixedFee),
 			FeeAmount:       money.FromDecimal(feeAmount),
 			FeePolicy:       feePolicy,
-			Currency:        lockedOrder.Currency,
+			Currency:        paymentCurrency,
 			Status:          constants.PaymentStatusInitiated,
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		}
-		if shouldUseCNYPaymentCurrency(channel) {
-			payment.Currency = "CNY"
-		}
-
 		if err := paymentRepo.Create(payment); err != nil {
 			return ErrPaymentCreateFailed
 		}
