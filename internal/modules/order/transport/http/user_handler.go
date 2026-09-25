@@ -410,6 +410,10 @@ func enrichOrderWithRefundRecords(refunds RefundRecordDirectory, order *orderdom
 }
 
 func respondFulfillmentDownload(c *gin.Context, order *orderdomain.Order) {
+	if !order.CanReadFulfillment() {
+		ginutil.RespondError(c, response.CodeNotFound, "error.fulfillment_not_found", nil)
+		return
+	}
 	payload := collectFulfillmentPayload(order)
 	if payload == "" {
 		ginutil.RespondError(c, response.CodeNotFound, "error.fulfillment_not_found", nil)
@@ -428,7 +432,7 @@ func collectFulfillmentPayload(order *orderdomain.Order) string {
 	}
 	var parts []string
 	for _, child := range order.Children {
-		if child.Fulfillment != nil && child.Fulfillment.Payload != "" {
+		if child.CanReadFulfillment() && child.Fulfillment != nil && child.Fulfillment.Payload != "" {
 			parts = append(parts, child.Fulfillment.Payload)
 		}
 	}

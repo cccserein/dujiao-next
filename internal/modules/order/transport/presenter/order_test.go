@@ -15,6 +15,26 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+func TestRefundedOrderDetailHidesStoredDelivery(t *testing.T) {
+	order := &orderdomain.Order{
+		Status:      "refunded",
+		Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-CARD", PayloadLineCount: 1},
+		Children: []orderdomain.Order{{
+			Status:      "delivered",
+			Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "CHILD-FAKE-CARD", PayloadLineCount: 1},
+		}},
+	}
+	detail := NewOrderDetail(order)
+	if detail.Fulfillment == nil || detail.Fulfillment.Payload != "" || detail.Children[0].Fulfillment.Payload != "" {
+		t.Fatal("refunded order exposed stored delivery content")
+	}
+	order.Status = "delivered"
+	detail = NewOrderDetail(order)
+	if detail.Fulfillment.Payload != "FAKE-CARD" {
+		t.Fatal("paid order delivery content was hidden")
+	}
+}
+
 func newMoney(value string) money.Amount {
 	return money.FromDecimal(decimal.RequireFromString(value))
 }
