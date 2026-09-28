@@ -290,6 +290,33 @@ func TestProductStoreSoftDeleteHidesProductAndRejectsStockMutations(t *testing.T
 	}
 }
 
+func TestProductStoreRejectsInjectedStringIDs(t *testing.T) {
+	repo, _ := setupProductStoreTest(t)
+	product := createManualProduct(t, repo, "injection-guard", 1, 0, 0)
+
+	for _, id := range []string{
+		"1 OR 1=1",
+		"1' OR '1'='1",
+		"1; DROP TABLE products;--",
+	} {
+		for name, lookup := range map[string]func(string) (*productdomain.Product, error){
+			"public": repo.GetByID,
+			"admin":  repo.GetAdminByID,
+		} {
+			got, err := lookup(id)
+			if err != nil || got != nil {
+				t.Fatalf("%s lookup accepted injected id %q: product=%#v err=%v", name, id, got, err)
+			}
+		}
+	}
+
+	validID := strconv.FormatUint(uint64(product.ID), 10)
+	got, err := repo.GetByID(validID)
+	if err != nil || got == nil || got.ID != product.ID {
+		t.Fatalf("valid product lookup failed after malicious inputs: product=%#v err=%v", got, err)
+	}
+}
+
 func TestProductStorePreloadsOnlyVisibleSKUs(t *testing.T) {
 	repo, db := setupProductStoreTest(t)
 	product := createManualProduct(t, repo, "visible-skus-only", 10, 0, 0)
