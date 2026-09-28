@@ -13,6 +13,21 @@ from urllib.parse import urlsplit
 
 
 ORDER_SQL = """
+WITH paid_payment_coverage AS (
+  SELECT o.id, o.online_paid_amount,
+    COALESCE(sum(p.amount) FILTER (WHERE p.status = 'success' AND p.deleted_at IS NULL AND p.currency = o.currency), 0) AS same_currency_success_amount,
+    count(*) FILTER (WHERE p.status = 'success' AND p.deleted_at IS NULL AND p.currency = o.currency) AS same_currency_success_count,
+    count(*) FILTER (WHERE p.status = 'success' AND p.deleted_at IS NULL AND p.currency <> o.currency) AS exchanged_success_count
+  FROM orders o
+  LEFT JOIN payments p ON p.order_id = o.id
+  WHERE o.deleted_at IS NULL AND o.parent_id IS NULL AND o.paid_at IS NOT NULL AND o.online_paid_amount > 0
+  GROUP BY o.id
+), same_currency_shortfalls AS (
+  SELECT online_paid_amount - same_currency_success_amount AS gap
+  FROM paid_payment_coverage
+  WHERE same_currency_success_count > 0 AND exchanged_success_count = 0
+    AND same_currency_success_amount + 0.01 < online_paid_amount
+)
 SELECT json_build_object(
   'orders_24h', (SELECT count(*) FROM orders WHERE deleted_at IS NULL AND parent_id IS NULL AND created_at >= now() - interval '24 hours'),
   'positive_orders_24h', (SELECT count(*) FROM orders WHERE deleted_at IS NULL AND parent_id IS NULL AND total_amount > 0 AND created_at >= now() - interval '24 hours'),
@@ -20,7 +35,9 @@ SELECT json_build_object(
   'paid_amount_gap', (SELECT count(*) FROM orders WHERE deleted_at IS NULL AND parent_id IS NULL AND total_amount > 0 AND paid_at IS NOT NULL AND wallet_paid_amount + online_paid_amount < total_amount),
   'delivery_without_payment', (SELECT count(*) FROM fulfillments f JOIN orders o ON o.id = f.order_id WHERE f.deleted_at IS NULL AND o.deleted_at IS NULL AND o.total_amount > 0 AND o.paid_at IS NULL),
   'online_paid_without_success_7d', (SELECT count(*) FROM orders o WHERE o.deleted_at IS NULL AND o.parent_id IS NULL AND o.created_at >= now() - interval '7 days' AND o.online_paid_amount > 0 AND o.paid_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.deleted_at IS NULL AND p.order_id = o.id AND p.status = 'success' AND p.paid_at IS NOT NULL)),
-  'successful_payment_unpaid_order_7d', (SELECT count(*) FROM payments p JOIN orders o ON o.id = p.order_id WHERE p.deleted_at IS NULL AND o.deleted_at IS NULL AND p.created_at >= now() - interval '7 days' AND p.status = 'success' AND p.paid_at IS NOT NULL AND o.paid_at IS NULL)
+  'successful_payment_unpaid_order_7d', (SELECT count(*) FROM payments p JOIN orders o ON o.id = p.order_id WHERE p.deleted_at IS NULL AND o.deleted_at IS NULL AND p.created_at >= now() - interval '7 days' AND p.status = 'success' AND p.paid_at IS NOT NULL AND o.paid_at IS NULL),
+  'paid_same_currency_undercoverage', (SELECT count(*) FROM same_currency_shortfalls),
+  'paid_same_currency_gap_amount', (SELECT COALESCE(sum(gap), 0) FROM same_currency_shortfalls)
 )::text;
 """
 
@@ -99,7 +116,7 @@ def main():
     orders = read_orders()
     traffic = read_traffic(args.access_log, now)
     health = check_health()
-    alerts = [name for name in ("paid_amount_gap", "delivery_without_payment", "online_paid_without_success_7d", "successful_payment_unpaid_order_7d") if orders[name] > 0]
+    alerts = [name for name in ("paid_amount_gap", "delivery_without_payment", "online_paid_without_success_7d", "successful_payment_unpaid_order_7d", "paid_same_currency_undercoverage") if orders[name] > 0]
     if health != 200:
         alerts.append("health_check_failed")
     if traffic["probe_requests_24h"] > 100:
