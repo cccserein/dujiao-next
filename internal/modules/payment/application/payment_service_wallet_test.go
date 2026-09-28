@@ -1278,6 +1278,9 @@ func TestForgedCallbackFactsLeaveOrderUnpaid(t *testing.T) {
 		{"forged smaller amount", func(in *PaymentCallbackInput) { in.Amount = money.FromDecimal(decimal.NewFromInt(1)) }, ErrPaymentAmountMismatch},
 		{"missing currency", func(in *PaymentCallbackInput) { in.Currency = "" }, ErrPaymentCurrencyMismatch},
 		{"wrong currency", func(in *PaymentCallbackInput) { in.Currency = "USD" }, ErrPaymentCurrencyMismatch},
+		{"confusable currency", func(in *PaymentCallbackInput) { in.Currency = "CＮY" }, ErrPaymentCurrencyMismatch},
+		{"null suffixed currency", func(in *PaymentCallbackInput) { in.Currency = "CNY\x00" }, ErrPaymentCurrencyMismatch},
+		{"multiline currency", func(in *PaymentCallbackInput) { in.Currency = "CNY\nUSD" }, ErrPaymentCurrencyMismatch},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			attack := valid
