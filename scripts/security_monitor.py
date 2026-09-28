@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 ORDER_SQL = """
 WITH paid_payment_coverage AS (
-  SELECT o.id, o.online_paid_amount,
+  SELECT o.id, o.paid_at, o.online_paid_amount,
     COALESCE(sum(p.amount) FILTER (WHERE p.status = 'success' AND p.deleted_at IS NULL AND p.currency = o.currency), 0) AS same_currency_success_amount,
     count(*) FILTER (WHERE p.status = 'success' AND p.deleted_at IS NULL AND p.currency = o.currency) AS same_currency_success_count,
     count(*) FILTER (WHERE p.status = 'success' AND p.deleted_at IS NULL AND p.currency <> o.currency) AS exchanged_success_count
@@ -23,7 +23,7 @@ WITH paid_payment_coverage AS (
   WHERE o.deleted_at IS NULL AND o.parent_id IS NULL AND o.paid_at IS NOT NULL AND o.online_paid_amount > 0
   GROUP BY o.id
 ), same_currency_shortfalls AS (
-  SELECT online_paid_amount - same_currency_success_amount AS gap
+  SELECT id, paid_at, online_paid_amount - same_currency_success_amount AS gap
   FROM paid_payment_coverage
   WHERE same_currency_success_count > 0 AND exchanged_success_count = 0
     AND same_currency_success_amount + 0.01 < online_paid_amount
@@ -37,6 +37,8 @@ SELECT json_build_object(
   'online_paid_without_success_7d', (SELECT count(*) FROM orders o WHERE o.deleted_at IS NULL AND o.parent_id IS NULL AND o.created_at >= now() - interval '7 days' AND o.online_paid_amount > 0 AND o.paid_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.deleted_at IS NULL AND p.order_id = o.id AND p.status = 'success' AND p.paid_at IS NOT NULL)),
   'successful_payment_unpaid_order_7d', (SELECT count(*) FROM payments p JOIN orders o ON o.id = p.order_id WHERE p.deleted_at IS NULL AND o.deleted_at IS NULL AND p.created_at >= now() - interval '7 days' AND p.status = 'success' AND p.paid_at IS NOT NULL AND o.paid_at IS NULL),
   'paid_same_currency_undercoverage', (SELECT count(*) FROM same_currency_shortfalls),
+  'paid_same_currency_undercoverage_24h', (SELECT count(*) FROM same_currency_shortfalls WHERE paid_at >= now() - interval '24 hours'),
+  'paid_same_currency_latest_order_id', (SELECT max(id) FROM same_currency_shortfalls),
   'paid_same_currency_gap_amount', (SELECT COALESCE(sum(gap), 0) FROM same_currency_shortfalls)
 )::text;
 """

@@ -5,7 +5,7 @@
 Current server installation:
 
 - Script: `/usr/local/sbin/dujiao-security-monitor.py`
-- Daily cron: `/etc/cron.d/dujiao-security-monitor` at 09:00 server time (UTC+8)
+- Hourly cron: `/etc/cron.d/dujiao-security-monitor` at minute 00 server time (UTC+8)
 - Report: `/var/lib/dujiao-monitor/latest.json` (root-only directory)
 - Access logs: `/var/log/nginx/dujiao-access.log` and its daily rotation, configured in the site's HTTP and HTTPS server blocks
 
