@@ -42,6 +42,26 @@ func TestConfigureTrustedProxiesAcceptsForwardedIPFromConfiguredProxy(t *testing
 	}
 }
 
+func TestConfigureTrustedProxiesIgnoresClientPrependedForwardedIP(t *testing.T) {
+	engine := gin.New()
+	if err := configureTrustedProxies(engine, []string{"127.0.0.1/32"}); err != nil {
+		t.Fatal(err)
+	}
+	engine.GET("/ip", func(c *gin.Context) { c.String(http.StatusOK, c.ClientIP()) })
+
+	// Nginx appends the actual peer to a client-supplied X-Forwarded-For chain.
+	// The rate limiter must use that peer, rather than the attacker-controlled first IP.
+	req := httptest.NewRequest(http.MethodGet, "/ip", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 203.0.113.9")
+	req.Header.Set("X-Real-IP", "1.2.3.4")
+	resp := httptest.NewRecorder()
+	engine.ServeHTTP(resp, req)
+	if resp.Body.String() != "203.0.113.9" {
+		t.Fatalf("client-prepended IP bypassed trusted proxy boundary: %q", resp.Body.String())
+	}
+}
+
 func TestConfigureTrustedProxiesRejectsInvalidCIDR(t *testing.T) {
 	if err := configureTrustedProxies(gin.New(), []string{"not-a-cidr"}); err == nil {
 		t.Fatal("expected invalid trusted proxy configuration to fail")
