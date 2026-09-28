@@ -1,10 +1,38 @@
 package bepusdt
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/dujiao-next/internal/constants"
 )
+
+func TestVerifyCallbackRejectsForgedAmountAndMissingSecret(t *testing.T) {
+	cfg := &Config{AuthToken: "sandbox-secret"}
+	callback := &CallbackData{
+		TradeID: "synthetic-trade", OrderID: "synthetic-order",
+		Amount: 111.0, ActualAmount: 15.0, Token: "synthetic-token",
+		BlockTransactionID: "synthetic-chain-tx", Status: StatusSuccess,
+	}
+	callback.Signature = Sign(map[string]interface{}{
+		"trade_id": callback.TradeID, "order_id": callback.OrderID,
+		"amount": callback.GetAmount(), "actual_amount": callback.GetActualAmount(),
+		"token": callback.Token, "block_transaction_id": callback.BlockTransactionID,
+		"status": callback.Status,
+	}, cfg.AuthToken)
+	if err := VerifyCallback(cfg, callback); err != nil {
+		t.Fatalf("valid synthetic callback rejected: %v", err)
+	}
+
+	callback.Amount = 1.0
+	if err := VerifyCallback(cfg, callback); !errors.Is(err, ErrSignatureInvalid) {
+		t.Fatalf("modified amount must fail signature verification, got %v", err)
+	}
+	callback.Amount = 111.0
+	if err := VerifyCallback(&Config{}, callback); !errors.Is(err, ErrConfigInvalid) {
+		t.Fatalf("empty merchant secret must be rejected, got %v", err)
+	}
+}
 
 func TestParseConfigAndNormalizeDefaults(t *testing.T) {
 	cfg, err := ParseConfig(map[string]interface{}{
