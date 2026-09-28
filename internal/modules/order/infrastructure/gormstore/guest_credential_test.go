@@ -65,6 +65,39 @@ func TestGuestCredentialIsHashedAtRestAndRawCredentialStillQueries(t *testing.T)
 	}
 }
 
+func TestGuestOrderLookupRejectsCredentialAndQueryTampering(t *testing.T) {
+	db := openOrderTenantScopeTestDB(t)
+	repo := New(db, "test-guest-credential-secret-with-32-bytes")
+	order := &orderdomain.Order{
+		OrderNo: "SANDBOX-GUEST-ORDER", GuestEmail: "guest@example.com",
+		GuestPassword: "sandbox-password", Status: constants.OrderStatusPendingPayment,
+		Currency: "USD", TotalAmount: money.FromDecimal(decimal.NewFromInt(10)),
+	}
+	if err := repo.Create(order, nil); err != nil {
+		t.Fatalf("create sandbox guest order: %v", err)
+	}
+
+	for _, tc := range []struct{ name, orderNo, email, password string }{
+		{"other email", order.OrderNo, "attacker@example.com", "sandbox-password"},
+		{"wrong password", order.OrderNo, order.GuestEmail, "wrong-password"},
+		{"order number injection", "' OR 1=1 --", order.GuestEmail, "sandbox-password"},
+		{"email injection", order.OrderNo, "' OR 1=1 --", "sandbox-password"},
+		{"password injection", order.OrderNo, order.GuestEmail, "' OR 1=1 --"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repo.GetByOrderNoAndGuest(tc.orderNo, tc.email, tc.password)
+			if err != nil || got != nil {
+				t.Fatalf("tampered guest lookup returned order=%#v err=%v", got, err)
+			}
+		})
+	}
+
+	got, err := repo.GetByOrderNoAndGuest(order.OrderNo, order.GuestEmail, "sandbox-password")
+	if err != nil || got == nil || got.ID != order.ID {
+		t.Fatalf("valid guest lookup failed after tampering attempts: order=%#v err=%v", got, err)
+	}
+}
+
 func TestGuestCredentialHashLikeRawPasswordCannotBypassHashing(t *testing.T) {
 	db := openOrderTenantScopeTestDB(t)
 	repo := New(db, "test-guest-credential-secret-with-32-bytes")

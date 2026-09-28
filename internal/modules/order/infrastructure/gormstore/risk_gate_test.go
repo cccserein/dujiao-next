@@ -33,6 +33,11 @@ func setupRiskGateDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	sqlDB.SetMaxOpenConns(10)
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close risk gate test database: %v", err)
+		}
+	})
 	return db
 }
 
