@@ -1251,6 +1251,54 @@ func TestFullyPaidCallbackStillFulfillsOrder(t *testing.T) {
 	}
 }
 
+func TestForgedCallbackFactsLeaveOrderUnpaid(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	channel := createUnderpaidChannel(t, db, svc, "Sandbox Callback Gateway", constants.PaymentChannelTypeWechat)
+	order := createUnderpaidOrder(t, db, "SANDBOX-CALLBACK-FACTS", 0, 15)
+	created, err := svc.CreatePayment(CreatePaymentInput{
+		OrderID: order.ID, ChannelID: channel.ID, Context: context.Background(),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox payment: %v", err)
+	}
+	valid := PaymentCallbackInput{
+		PaymentID: created.Payment.ID, OrderNo: order.OrderNo, ChannelID: channel.ID,
+		Status: constants.PaymentStatusSuccess, Amount: created.Payment.Amount,
+		Currency: "CNY", ProviderRef: "sandbox-provider-ref",
+	}
+	for _, tc := range []struct {
+		name string
+		mutate func(*PaymentCallbackInput)
+		want error
+	}{
+		{"wrong order", func(in *PaymentCallbackInput) { in.OrderNo = "OTHER-ORDER" }, ErrPaymentInvalid},
+		{"wrong channel", func(in *PaymentCallbackInput) { in.ChannelID++ }, ErrPaymentInvalid},
+		{"zero amount", func(in *PaymentCallbackInput) { in.Amount = money.FromDecimal(decimal.Zero) }, ErrPaymentAmountMismatch},
+		{"negative amount", func(in *PaymentCallbackInput) { in.Amount = money.FromDecimal(decimal.NewFromInt(-15)) }, ErrPaymentAmountMismatch},
+		{"forged smaller amount", func(in *PaymentCallbackInput) { in.Amount = money.FromDecimal(decimal.NewFromInt(1)) }, ErrPaymentAmountMismatch},
+		{"missing currency", func(in *PaymentCallbackInput) { in.Currency = "" }, ErrPaymentCurrencyMismatch},
+		{"wrong currency", func(in *PaymentCallbackInput) { in.Currency = "USD" }, ErrPaymentCurrencyMismatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attack := valid
+			tc.mutate(&attack)
+			if _, err := svc.HandleCallback(attack); err != tc.want {
+				t.Fatalf("forged callback error = %v, want %v", err, tc.want)
+			}
+			var currentOrder orderdomain.Order
+			if err := db.First(&currentOrder, order.ID).Error; err != nil {
+				t.Fatalf("reload sandbox order: %v", err)
+			}
+			if currentOrder.Status != constants.OrderStatusPendingPayment || currentOrder.PaidAt != nil {
+				t.Fatalf("forged callback changed order state: %+v", currentOrder)
+			}
+		})
+	}
+	if _, err := svc.HandleCallback(valid); err != nil {
+		t.Fatalf("valid callback failed after forged attempts: %v", err)
+	}
+}
+
 // 余额分配在"用余额 → 改在线 → 再用余额"之间来回切换时，每一轮都必须真实扣款。
 // 轮次幂等键缺失时第二轮会命中上一轮早已退回的流水，订单被标记为已用余额、钱包却没扣钱。
 func TestWalletBalanceReappliedAfterReleaseDebitsAgain(t *testing.T) {
