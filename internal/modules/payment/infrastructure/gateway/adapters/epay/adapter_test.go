@@ -145,6 +145,45 @@ func TestEpayAdapter_VerifyCallbackRejectsMerchantMismatch(t *testing.T) {
 	}
 }
 
+func TestEpayAdapter_DuplicateCallbackFieldsCannotOverrideSignedValues(t *testing.T) {
+	raw := jsonmap.JSON{
+		"gateway_url":  "https://epay.example.com",
+		"epay_version": "v1",
+		"merchant_id":  "1001",
+		"merchant_key": "sandbox-key",
+		"notify_url":   "https://api.example.com/callback",
+		"return_url":   "https://shop.example.com/pay",
+		"sign_type":    "MD5",
+	}
+	for _, tc := range []struct {
+		name, signedAmount, injectedAmount string
+	}{
+		{"inflate underpayment", "1.00", "111.00"},
+		{"shrink payment", "111.00", "1.00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			form := signEpayV1AdapterCallbackForm(map[string]string{
+				"pid": "1001", "out_trade_no": "SANDBOX-ORDER",
+				"trade_no": "SANDBOX-TRADE", "money": tc.signedAmount,
+				"trade_status": constants.EpayTradeStatusSuccess,
+			}, "sandbox-key")
+			form["money"] = append(form["money"], tc.injectedAmount)
+			form["out_trade_no"] = append(form["out_trade_no"], "OTHER-ORDER")
+
+			result, err := NewEpayAdapter().(paymentcontract.GatewayCallbackVerifier).VerifyCallback(raw, form, nil)
+			if err != nil {
+				t.Fatalf("signed callback rejected: %v", err)
+			}
+			if got := result.Amount.String(); got != tc.signedAmount {
+				t.Fatalf("duplicate money overrode signed value: got %s, want %s", got, tc.signedAmount)
+			}
+			if result.OrderNo != "SANDBOX-ORDER" {
+				t.Fatalf("duplicate order number overrode signed value: %s", result.OrderNo)
+			}
+		})
+	}
+}
+
 func TestEpayAdapter_MapEpayError(t *testing.T) {
 	cases := []struct {
 		name string
