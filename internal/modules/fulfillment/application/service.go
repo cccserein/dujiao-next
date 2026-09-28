@@ -119,6 +119,16 @@ func (s *Service) CreateManual(input CreateManualInput) (*fulfillmentdomain.Fulf
 
 	var created *fulfillmentdomain.Fulfillment
 	err = s.orderStore.WithinTransaction(func(tx ordercontract.Transaction) error {
+		lockedOrder, err := tx.Orders().GetByIDForUpdate(input.OrderID)
+		if err != nil {
+			return ErrOrderFetchFailed
+		}
+		if lockedOrder == nil {
+			return ErrOrderNotFound
+		}
+		if lockedOrder.Status != constants.OrderStatusPaid && lockedOrder.Status != constants.OrderStatusFulfilling {
+			return ErrOrderStatusInvalid
+		}
 		if _, found, err := tx.Fulfillments().FindByOrderIDForUpdate(input.OrderID); err != nil {
 			return err
 		} else if found {
@@ -152,6 +162,15 @@ func (s *Service) CreateManual(input CreateManualInput) (*fulfillmentdomain.Fulf
 	if err != nil {
 		if errors.Is(err, ErrFulfillmentExists) {
 			return nil, ErrFulfillmentExists
+		}
+		if errors.Is(err, ErrOrderNotFound) {
+			return nil, ErrOrderNotFound
+		}
+		if errors.Is(err, ErrOrderFetchFailed) {
+			return nil, ErrOrderFetchFailed
+		}
+		if errors.Is(err, ErrOrderStatusInvalid) {
+			return nil, ErrOrderStatusInvalid
 		}
 		if errors.Is(err, ErrOrderUpdateFailed) {
 			return nil, ErrOrderUpdateFailed
