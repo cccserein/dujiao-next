@@ -69,3 +69,23 @@ func TestAdminDownloadFulfillmentRequiresCardSecretPermission(t *testing.T) {
 		})
 	}
 }
+
+func TestAdminDownloadFulfillmentRejectsTamperedOrderIDs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, id := range []string{"1 OR 1=1", "-1", "18446744073709551616", "../1"} {
+		t.Run(id, func(t *testing.T) {
+			orders := &secretTestOrders{}
+			handler := NewAdminHandler(secretTestCreator{}, orders, secretTestAuthorizer{allowed: true})
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			context.Request = httptest.NewRequest(http.MethodGet, "/api/v1/admin/orders/1/fulfillment/download", nil)
+			context.Params = gin.Params{{Key: "id", Value: id}}
+			context.Set("admin_id", uint(7))
+			handler.AdminDownloadFulfillment(context)
+			if orders.reads != 0 || strings.Contains(recorder.Body.String(), "DISPOSABLE-TEST-CARD") ||
+				!strings.Contains(recorder.Body.String(), `"status_code":400`) {
+				t.Fatalf("tampered id %q reached fulfillment lookup: reads=%d body=%s", id, orders.reads, recorder.Body.String())
+			}
+		})
+	}
+}
