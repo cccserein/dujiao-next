@@ -261,6 +261,13 @@ func TestPaymentCallbackRejectsOkpayJSONCurrencyMismatch(t *testing.T) {
 	assertOkpayCallbackRejected(t, fixture, w)
 }
 
+func TestPaymentCallbackRejectsOkpayJSONReplayedForDifferentMerchantOrder(t *testing.T) {
+	fixture := newOkpayCallbackFixture(t)
+	body := signedOkpayJSONCallbackForOrder("616.00000000", "USDT", "DJP9002", "token-1")
+	w := performOkpayJSONCallback(t, fixture, body)
+	assertOkpayCallbackRejected(t, fixture, w)
+}
+
 func performOkpayJSONCallback(t *testing.T, fixture *okpayCallbackFixture, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(body))
@@ -297,16 +304,22 @@ func assertOkpayCallbackRejected(t *testing.T, fixture *okpayCallbackFixture, w 
 }
 
 func signedOkpayJSONCallback(amount string, coin string, token string) string {
+	return signedOkpayJSONCallbackForOrder(amount, coin, "DJP9001", token)
+}
+
+func signedOkpayJSONCallbackForOrder(amount string, coin string, merchantOrderNo string, token string) string {
 	bodyWithoutSign := fmt.Sprintf(
-		`{"code":200,"data":{"order_id":"OKPAY-ORDER-1","unique_id":"DJP9001","pay_user_id":"7238234930","amount":%q,"coin":%q,"status":1,"type":"deposit"},"id":"shop-1","status":"success"}`,
+		`{"code":200,"data":{"order_id":"OKPAY-ORDER-1","unique_id":%q,"pay_user_id":"7238234930","amount":%q,"coin":%q,"status":1,"type":"deposit"},"id":"shop-1","status":"success"}`,
+		merchantOrderNo,
 		amount,
 		coin,
 	)
 	// 新协议签名原文用点号展开嵌套 data,不做 URL 编码。
 	signBase := fmt.Sprintf(
-		`code=200&data.amount=%s&data.coin=%s&data.order_id=OKPAY-ORDER-1&data.pay_user_id=7238234930&data.status=1&data.type=deposit&data.unique_id=DJP9001&id=shop-1&status=success`,
+		`code=200&data.amount=%s&data.coin=%s&data.order_id=OKPAY-ORDER-1&data.pay_user_id=7238234930&data.status=1&data.type=deposit&data.unique_id=%s&id=shop-1&status=success`,
 		amount,
 		coin,
+		merchantOrderNo,
 	)
 	sign := hmacSHA256HexUpper(signBase, token)
 	return strings.TrimSuffix(bodyWithoutSign, "}") + `,"sign":"` + sign + `"}`
