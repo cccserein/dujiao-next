@@ -708,4 +708,20 @@ func TestBuildOrderResultRejectsZeroTotalAmountAfterCoupon(t *testing.T) {
 	if !errors.Is(err, ErrInvalidOrderAmount) {
 		t.Fatalf("expected invalid order amount, got: %v", err)
 	}
+	// A coupon greater than the product price must not create a free order.
+	if err := db.Model(&coupon).Update("value", money.FromDecimal(decimal.NewFromInt(11))).Error; err != nil {
+		t.Fatalf("raise synthetic coupon value: %v", err)
+	}
+	_, err = svc.buildOrderResult(orderCreateParams{
+		UserID:     1,
+		CouponCode: "FREE10",
+		Items: []CreateOrderItem{{
+			ProductID: product.ID,
+			SKUID:     sku.ID,
+			Quantity:  1,
+		}},
+	})
+	if !errors.Is(err, ErrInvalidOrderAmount) {
+		t.Fatalf("over-discount coupon must not create a free order, got: %v", err)
+	}
 }
