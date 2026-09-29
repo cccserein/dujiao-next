@@ -71,6 +71,29 @@ func TestKeyByIPAndJSONFieldBoundsUnknownLengthBody(t *testing.T) {
 	}
 }
 
+func TestKeyByIPAndJSONFieldBoundsBodyWithFalseSmallContentLength(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := `{"email":"virtual@example.test","padding":"` + strings.Repeat("x", maxRateLimitJSONFieldBodyBytes) + `"}`
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth", nil)
+	c.Request.RemoteAddr = "203.0.113.10:1234"
+	c.Request.ContentLength = 20
+	counted := &countingBody{Reader: strings.NewReader(body)}
+	c.Request.Body = io.NopCloser(counted)
+
+	if key := KeyByIPAndJSONField("email")(c); key != "203.0.113.10" {
+		t.Fatalf("oversized body with a false content length must use the IP key, got %q", key)
+	}
+	if counted.readBytes > maxRateLimitJSONFieldBodyBytes+1 {
+		t.Fatalf("rate-limit key extraction read %d bytes", counted.readBytes)
+	}
+	replayed, err := io.ReadAll(c.Request.Body)
+	if err != nil || string(replayed) != body {
+		t.Fatalf("request body was not preserved after bounded key extraction: err=%v", err)
+	}
+}
+
 func TestRateLimitMiddlewareWithoutClient(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
