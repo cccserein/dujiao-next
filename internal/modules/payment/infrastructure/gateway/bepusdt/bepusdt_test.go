@@ -34,6 +34,40 @@ func TestVerifyCallbackRejectsForgedAmountAndMissingSecret(t *testing.T) {
 	}
 }
 
+func TestVerifyCallbackRejectsReusedSignatureForDifferentOrderOrStatus(t *testing.T) {
+	cfg := &Config{AuthToken: "sandbox-secret"}
+	original := CallbackData{
+		TradeID: "synthetic-trade", OrderID: "synthetic-order",
+		Amount: 111.0, ActualAmount: 15.0, Token: "synthetic-token",
+		BlockTransactionID: "synthetic-chain-tx", Status: StatusSuccess,
+	}
+	original.Signature = Sign(map[string]interface{}{
+		"trade_id": original.TradeID, "order_id": original.OrderID,
+		"amount": original.GetAmount(), "actual_amount": original.GetActualAmount(),
+		"token": original.Token, "block_transaction_id": original.BlockTransactionID,
+		"status": original.Status,
+	}, cfg.AuthToken)
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CallbackData)
+	}{
+		{"different order", func(data *CallbackData) { data.OrderID = "attacker-order" }},
+		{"different trade", func(data *CallbackData) { data.TradeID = "attacker-trade" }},
+		{"different token", func(data *CallbackData) { data.Token = "attacker-token" }},
+		{"different actual amount", func(data *CallbackData) { data.ActualAmount = 1.0 }},
+		{"pending status", func(data *CallbackData) { data.Status = StatusWaiting }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forged := original
+			tc.mutate(&forged)
+			if err := VerifyCallback(cfg, &forged); err == nil {
+				t.Fatal("reused signature accepted modified callback")
+			}
+		})
+	}
+}
+
 func TestParseConfigAndNormalizeDefaults(t *testing.T) {
 	cfg, err := ParseConfig(map[string]interface{}{
 		"gateway_url": " https://pay.example.com/ ",
