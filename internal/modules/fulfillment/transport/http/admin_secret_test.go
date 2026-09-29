@@ -72,7 +72,7 @@ func TestAdminDownloadFulfillmentRequiresCardSecretPermission(t *testing.T) {
 
 func TestAdminDownloadFulfillmentRejectsTamperedOrderIDs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, id := range []string{"1 OR 1=1", "-1", "18446744073709551616", "../1"} {
+	for _, id := range []string{"1 OR 1=1", "-1", "0", "+1", "0x1", "１", "18446744073709551616", "../1"} {
 		t.Run(id, func(t *testing.T) {
 			orders := &secretTestOrders{}
 			handler := NewAdminHandler(secretTestCreator{}, orders, secretTestAuthorizer{allowed: true})
