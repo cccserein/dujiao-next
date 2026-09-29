@@ -278,16 +278,29 @@ func KeyByIPAndJSONField(field string) RateLimitKeyFunc {
 	}
 }
 
+const maxRateLimitJSONFieldBodyBytes = 64 << 10
+
+type replayReadCloser struct {
+	io.Reader
+	original io.ReadCloser
+}
+
+func (r replayReadCloser) Close() error { return r.original.Close() }
+
 func readJSONField(c *gin.Context, field string) string {
 	if c == nil || c.Request == nil || c.Request.Body == nil {
 		return ""
 	}
-	body, err := io.ReadAll(c.Request.Body)
+	if c.Request.ContentLength > maxRateLimitJSONFieldBodyBytes {
+		return ""
+	}
+	original := c.Request.Body
+	body, err := io.ReadAll(io.LimitReader(original, maxRateLimitJSONFieldBodyBytes+1))
+	c.Request.Body = replayReadCloser{Reader: io.MultiReader(bytes.NewReader(body), original), original: original}
 	if err != nil {
 		return ""
 	}
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
-	if len(body) == 0 {
+	if len(body) == 0 || len(body) > maxRateLimitJSONFieldBodyBytes {
 		return ""
 	}
 	var payload map[string]interface{}
