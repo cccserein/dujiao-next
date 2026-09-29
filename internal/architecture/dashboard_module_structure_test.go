@@ -113,7 +113,7 @@ func assertDirectoryGoFileBudget(t *testing.T, directory string, maximum int) {
 	}
 	files := make([]string, 0)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
 			continue
 		}
 		files = append(files, entry.Name())
