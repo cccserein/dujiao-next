@@ -172,46 +172,54 @@ func (store refundBeforeFulfillmentTransaction) WithinTransaction(fn func(orderc
 }
 
 func TestCreateAutoFulfillmentRechecksPaidStatusInsideTransaction(t *testing.T) {
-	db := setupFulfillmentServiceTestDB(t)
-	now := time.Now()
-	order := &orderdomain.Order{
-		OrderNo: "SANDBOX-REFUND-RACE", UserID: 1, Status: constants.OrderStatusPaid,
-		Currency: "CNY", TotalAmount: money.FromDecimal(decimal.NewFromInt(10)),
-		CreatedAt: now, UpdatedAt: now,
-	}
-	if err := db.Create(order).Error; err != nil {
-		t.Fatalf("create paid order: %v", err)
-	}
-	if err := db.Create(&orderdomain.OrderItem{
-		OrderID: order.ID, ProductID: 100, SKUID: 1001, Quantity: 1,
-		TitleJSON:       jsonmap.JSON{"zh-CN": "fake product"},
-		FulfillmentType: constants.FulfillmentTypeAuto,
-		UnitPrice:       money.FromDecimal(decimal.NewFromInt(10)),
-		TotalPrice:      money.FromDecimal(decimal.NewFromInt(10)),
-	}).Error; err != nil {
-		t.Fatalf("create fake order item: %v", err)
-	}
-	secret := &cardsecretdomain.Secret{
-		ProductID: 100, SKUID: 1001, Secret: "SANDBOX-CARD",
-		Status: cardsecretdomain.StatusAvailable,
-	}
-	if err := db.Create(secret).Error; err != nil {
-		t.Fatalf("create fake card secret: %v", err)
-	}
-	store := refundBeforeFulfillmentTransaction{
-		Store: ordergormstore.New(db, "test-guest-credential-secret-with-32-bytes"),
-		db:    db, orderID: order.ID,
-	}
-	svc := New(Options{OrderStore: store, FulfillmentStore: fulfillmentgormstore.New(db)})
-	if fulfillment, err := svc.CreateAuto(order.ID); err != ErrOrderStatusInvalid || fulfillment != nil {
-		t.Fatalf("refunded order must not receive a fake card: fulfillment=%#v err=%v", fulfillment, err)
-	}
-	var storedSecret cardsecretdomain.Secret
-	if err := db.First(&storedSecret, secret.ID).Error; err != nil {
-		t.Fatalf("reload fake card: %v", err)
-	}
-	if storedSecret.Status != cardsecretdomain.StatusAvailable {
-		t.Fatalf("refunded order consumed fake card: %s", storedSecret.Status)
+	for _, status := range []string{
+		constants.OrderStatusRefunded,
+		constants.OrderStatusPartiallyRefunded,
+		constants.OrderStatusCanceled,
+	} {
+		t.Run(status, func(t *testing.T) {
+			db := setupFulfillmentServiceTestDB(t)
+			now := time.Now()
+			order := &orderdomain.Order{
+				OrderNo: "SANDBOX-REFUND-RACE", UserID: 1, Status: constants.OrderStatusPaid,
+				Currency: "CNY", TotalAmount: money.FromDecimal(decimal.NewFromInt(10)),
+				CreatedAt: now, UpdatedAt: now,
+			}
+			if err := db.Create(order).Error; err != nil {
+				t.Fatalf("create paid order: %v", err)
+			}
+			if err := db.Create(&orderdomain.OrderItem{
+				OrderID: order.ID, ProductID: 100, SKUID: 1001, Quantity: 1,
+				TitleJSON:       jsonmap.JSON{"zh-CN": "fake product"},
+				FulfillmentType: constants.FulfillmentTypeAuto,
+				UnitPrice:       money.FromDecimal(decimal.NewFromInt(10)),
+				TotalPrice:      money.FromDecimal(decimal.NewFromInt(10)),
+			}).Error; err != nil {
+				t.Fatalf("create fake order item: %v", err)
+			}
+			secret := &cardsecretdomain.Secret{
+				ProductID: 100, SKUID: 1001, Secret: "SANDBOX-CARD",
+				Status: cardsecretdomain.StatusAvailable,
+			}
+			if err := db.Create(secret).Error; err != nil {
+				t.Fatalf("create fake card secret: %v", err)
+			}
+			store := refundBeforeFulfillmentTransaction{
+				Store: ordergormstore.New(db, "test-guest-credential-secret-with-32-bytes"),
+				db:    db, orderID: order.ID, status: status,
+			}
+			svc := New(Options{OrderStore: store, FulfillmentStore: fulfillmentgormstore.New(db)})
+			if fulfillment, err := svc.CreateAuto(order.ID); err != ErrOrderStatusInvalid || fulfillment != nil {
+				t.Fatalf("changed-status order must not receive a fake card: fulfillment=%#v err=%v", fulfillment, err)
+			}
+			var storedSecret cardsecretdomain.Secret
+			if err := db.First(&storedSecret, secret.ID).Error; err != nil {
+				t.Fatalf("reload fake card: %v", err)
+			}
+			if storedSecret.Status != cardsecretdomain.StatusAvailable {
+				t.Fatalf("changed-status order consumed fake card: %s", storedSecret.Status)
+			}
+		})
 	}
 }
 
