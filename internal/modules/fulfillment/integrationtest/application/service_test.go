@@ -156,11 +156,16 @@ type refundBeforeFulfillmentTransaction struct {
 	ordercontract.Store
 	db      *gorm.DB
 	orderID uint
+	status  string
 }
 
 func (store refundBeforeFulfillmentTransaction) WithinTransaction(fn func(ordercontract.Transaction) error) error {
+	status := store.status
+	if status == "" {
+		status = constants.OrderStatusRefunded
+	}
 	if err := store.db.Model(&orderdomain.Order{}).Where("id = ?", store.orderID).
-		Update("status", constants.OrderStatusRefunded).Error; err != nil {
+		Update("status", status).Error; err != nil {
 		return err
 	}
 	return store.Store.WithinTransaction(fn)
@@ -211,31 +216,39 @@ func TestCreateAutoFulfillmentRechecksPaidStatusInsideTransaction(t *testing.T) 
 }
 
 func TestCreateManualFulfillmentRechecksStatusInsideTransaction(t *testing.T) {
-	db := setupFulfillmentServiceTestDB(t)
-	order := &orderdomain.Order{
-		OrderNo: "SANDBOX-MANUAL-REFUND-RACE", UserID: 1,
-		Status: constants.OrderStatusPaid, Currency: "CNY",
-		TotalAmount: money.FromDecimal(decimal.NewFromInt(10)),
-	}
-	if err := db.Create(order).Error; err != nil {
-		t.Fatalf("create paid order: %v", err)
-	}
-	store := refundBeforeFulfillmentTransaction{
-		Store: ordergormstore.New(db, "test-guest-credential-secret-with-32-bytes"),
-		db:    db, orderID: order.ID,
-	}
-	svc := New(Options{OrderStore: store, FulfillmentStore: fulfillmentgormstore.New(db)})
-	got, err := svc.CreateManual(CreateManualInput{
-		OrderID: order.ID, AdminID: 7, Payload: "SANDBOX-MANUAL-SECRET",
-	})
-	if err != ErrOrderStatusInvalid || got != nil {
-		t.Fatalf("refunded order accepted manual secret: fulfillment=%#v err=%v", got, err)
-	}
-	var count int64
-	if err := db.Model(&fulfillmentdomain.Fulfillment{}).Where("order_id = ?", order.ID).Count(&count).Error; err != nil {
-		t.Fatalf("count fulfillment rows: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("refunded order persisted %d fulfillment rows", count)
+	for _, status := range []string{
+		constants.OrderStatusRefunded,
+		constants.OrderStatusPartiallyRefunded,
+		constants.OrderStatusCanceled,
+	} {
+		t.Run(status, func(t *testing.T) {
+			db := setupFulfillmentServiceTestDB(t)
+			order := &orderdomain.Order{
+				OrderNo: "SANDBOX-MANUAL-STATUS-RACE", UserID: 1,
+				Status: constants.OrderStatusPaid, Currency: "CNY",
+				TotalAmount: money.FromDecimal(decimal.NewFromInt(10)),
+			}
+			if err := db.Create(order).Error; err != nil {
+				t.Fatalf("create paid order: %v", err)
+			}
+			store := refundBeforeFulfillmentTransaction{
+				Store: ordergormstore.New(db, "test-guest-credential-secret-with-32-bytes"),
+				db:    db, orderID: order.ID, status: status,
+			}
+			svc := New(Options{OrderStore: store, FulfillmentStore: fulfillmentgormstore.New(db)})
+			got, err := svc.CreateManual(CreateManualInput{
+				OrderID: order.ID, AdminID: 7, Payload: "SANDBOX-MANUAL-SECRET",
+			})
+			if err != ErrOrderStatusInvalid || got != nil {
+				t.Fatalf("changed-status order accepted manual secret: fulfillment=%#v err=%v", got, err)
+			}
+			var count int64
+			if err := db.Model(&fulfillmentdomain.Fulfillment{}).Where("order_id = ?", order.ID).Count(&count).Error; err != nil {
+				t.Fatalf("count fulfillment rows: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("changed-status order persisted %d fulfillment rows", count)
+			}
+		})
 	}
 }
