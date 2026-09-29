@@ -167,6 +167,41 @@ func TestUserCompleteLoginAfter2FAIssuesAccessToken(t *testing.T) {
 	}
 }
 
+func TestUserChallengeRejectedAfterSessionRevocation(t *testing.T) {
+	authSvc, _, repo, _ := newUser2FATestServices(t)
+	user := createActiveUser(t, repo, "revoked-challenge@example.com", "secret123")
+	challengeToken, _, _, err := authSvc.IssueUserChallengeToken(user.ID, false)
+	if err != nil {
+		t.Fatalf("issue challenge: %v", err)
+	}
+	user.TokenVersion++
+	if err := repo.Update(user); err != nil {
+		t.Fatalf("revoke sessions: %v", err)
+	}
+	if _, err := authSvc.ParseUserChallengeToken(challengeToken); err == nil {
+		t.Fatal("challenge issued before session revocation remained valid")
+	}
+}
+
+func TestUserChallengeAndCompletionRejectDisabledAccount(t *testing.T) {
+	authSvc, _, repo, _ := newUser2FATestServices(t)
+	user := createActiveUser(t, repo, "disabled-challenge@example.com", "secret123")
+	challengeToken, _, _, err := authSvc.IssueUserChallengeToken(user.ID, false)
+	if err != nil {
+		t.Fatalf("issue challenge: %v", err)
+	}
+	user.Status = constants.UserStatusDisabled
+	if err := repo.Update(user); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+	if _, err := authSvc.ParseUserChallengeToken(challengeToken); err == nil {
+		t.Fatal("disabled account challenge remained valid")
+	}
+	if res, err := authSvc.CompleteLoginAfter2FA(user.ID, false); err != userauthapp.ErrUserDisabled || res != nil {
+		t.Fatalf("disabled account completed login: result=%v err=%v", res, err)
+	}
+}
+
 func TestUserParseChallengeRejectsAccessToken(t *testing.T) {
 	authSvc, _, repo, _ := newUser2FATestServices(t)
 	user := createActiveUser(t, repo, "swap@example.com", "secret123")

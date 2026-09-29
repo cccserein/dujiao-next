@@ -118,12 +118,13 @@ type UserJWTClaims struct {
 // 注：Typ 字段同时占用与 UserJWTClaims 兼容的 typ 键，写入 "2fa_challenge"，
 // 防止挑战 token 在被错误地解析为 UserJWTClaims 时通过中间件的 typ 校验。
 type UserChallengeClaims struct {
-	UserID      uint   `json:"user_id"`
-	JTI         string `json:"jti"`
-	Purpose     string `json:"purpose"`
-	RememberMe  bool   `json:"remember_me"`
-	LoginSource string `json:"login_source,omitempty"`
-	Typ         string `json:"typ"`
+	UserID       uint   `json:"user_id"`
+	TokenVersion uint64 `json:"token_version"`
+	JTI          string `json:"jti"`
+	Purpose      string `json:"purpose"`
+	RememberMe   bool   `json:"remember_me"`
+	LoginSource  string `json:"login_source,omitempty"`
+	Typ          string `json:"typ"`
 	jwt.RegisteredClaims
 }
 
@@ -398,15 +399,26 @@ func (s *Service) IssueUserChallengeToken(userID uint, rememberMe bool) (token, 
 // IssueUserChallengeTokenForSource signs a 2FA challenge while retaining the
 // original login provider for the completion audit log.
 func (s *Service) IssueUserChallengeTokenForSource(userID uint, rememberMe bool, loginSource string) (token, jti string, expiresAt time.Time, err error) {
+	user, err := s.userRepo.GetByID(userID)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	if user == nil {
+		return "", "", time.Time{}, ErrNotFound
+	}
+	if strings.ToLower(strings.TrimSpace(user.Status)) != constants.UserStatusActive {
+		return "", "", time.Time{}, ErrUserDisabled
+	}
 	jti = uuid.NewString()
 	expiresAt = time.Now().Add(challenge.TTL)
 	claims := UserChallengeClaims{
-		UserID:      userID,
-		JTI:         jti,
-		Purpose:     challenge.PurposeTwoFactor,
-		RememberMe:  rememberMe,
-		LoginSource: normalizeLoginSource(loginSource),
-		Typ:         jwttoken.TypeTwoFactorChallenge,
+		UserID:       userID,
+		TokenVersion: user.TokenVersion,
+		JTI:          jti,
+		Purpose:      challenge.PurposeTwoFactor,
+		RememberMe:   rememberMe,
+		LoginSource:  normalizeLoginSource(loginSource),
+		Typ:          jwttoken.TypeTwoFactorChallenge,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -449,6 +461,12 @@ func (s *Service) ParseUserChallengeToken(tokenString string) (*UserChallengeCla
 	if claims.Purpose != challenge.PurposeTwoFactor || claims.Typ != jwttoken.TypeTwoFactorChallenge {
 		return nil, errors.New("invalid challenge purpose")
 	}
+	user, err := s.userRepo.GetByID(claims.UserID)
+	if err != nil || user == nil || strings.ToLower(strings.TrimSpace(user.Status)) != constants.UserStatusActive ||
+		claims.TokenVersion != user.TokenVersion || claims.IssuedAt == nil ||
+		(user.TokenInvalidBefore != nil && claims.IssuedAt.Time.Unix() < user.TokenInvalidBefore.Unix()) {
+		return nil, errors.New("revoked challenge token")
+	}
 	return claims, nil
 }
 
@@ -460,6 +478,9 @@ func (s *Service) CompleteLoginAfter2FA(userID uint, rememberMe bool) (*UserLogi
 	}
 	if user == nil {
 		return nil, ErrNotFound
+	}
+	if strings.ToLower(strings.TrimSpace(user.Status)) != constants.UserStatusActive {
+		return nil, ErrUserDisabled
 	}
 	expireHours := resolveUserJWTExpireHours(s.cfg.UserJWT)
 	if rememberMe {

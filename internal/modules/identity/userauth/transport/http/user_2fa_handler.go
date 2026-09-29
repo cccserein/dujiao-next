@@ -329,6 +329,12 @@ func (h *User2FAHandler) VerifyUser2FA(c *gin.Context) {
 	if h.challenges != nil {
 		h.challenges.Revoke(ctx, claims.JTI)
 	}
+	// Session revocation or account disablement may occur while TOTP is verified.
+	// Recheck the signed challenge against current user state before issuing JWT.
+	if _, err := h.auth.ParseUserChallengeToken(req.ChallengeToken); err != nil {
+		ginutil.RespondError(c, response.CodeUnauthorized, "error.totp_challenge_invalid", nil)
+		return
+	}
 	loginRes, err := h.auth.CompleteLoginAfter2FA(claims.UserID, claims.RememberMe)
 	if err != nil {
 		ginutil.RespondError(c, response.CodeInternal, "error.login_failed", err)
