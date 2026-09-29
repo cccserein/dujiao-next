@@ -81,9 +81,13 @@ func TestGuestOrderLookupRejectsCredentialAndQueryTampering(t *testing.T) {
 		{"other email", order.OrderNo, "attacker@example.com", "sandbox-password"},
 		{"wrong password", order.OrderNo, order.GuestEmail, "wrong-password"},
 		{"order number wildcard", "%", order.GuestEmail, "sandbox-password"},
+		{"order number single character wildcard", "SANDBOX-GUEST-ORDE_", order.GuestEmail, "sandbox-password"},
 		{"email wildcard", order.OrderNo, "%", "sandbox-password"},
+		{"email single character wildcard", order.OrderNo, "guest@example.co_", "sandbox-password"},
 		{"password with trailing whitespace", order.OrderNo, order.GuestEmail, "sandbox-password "},
+		{"password with null byte", order.OrderNo, order.GuestEmail, "sandbox-password\x00"},
 		{"order number injection", "' OR 1=1 --", order.GuestEmail, "sandbox-password"},
+		{"order number block comment injection", "' OR 1=1 /*", order.GuestEmail, "sandbox-password"},
 		{"email injection", order.OrderNo, "' OR 1=1 --", "sandbox-password"},
 		{"password injection", order.OrderNo, order.GuestEmail, "' OR 1=1 --"},
 	} {
