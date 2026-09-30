@@ -12,17 +12,21 @@ import (
 )
 
 func TestFulfillmentDownloadRejectsRefundedOrder(t *testing.T) {
-	order := &orderdomain.Order{
-		OrderNo:     "TEST-REFUNDED",
-		Status:      "refunded",
-		Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-CARD"},
-	}
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest("GET", "/", nil)
-	respondFulfillmentDownload(ctx, order)
-	if strings.Contains(recorder.Body.String(), "FAKE-CARD") || !strings.Contains(recorder.Body.String(), `"status_code":404`) {
-		t.Fatalf("refunded delivery was not blocked: %s", recorder.Body.String())
+	for _, status := range []string{"pending_payment", "canceled", "refunded"} {
+		t.Run(status, func(t *testing.T) {
+			order := &orderdomain.Order{
+				OrderNo:     "TEST-BLOCKED",
+				Status:      status,
+				Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-CARD"},
+			}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest("GET", "/", nil)
+			respondFulfillmentDownload(ctx, order)
+			if strings.Contains(recorder.Body.String(), "FAKE-CARD") || !strings.Contains(recorder.Body.String(), `"status_code":404`) {
+				t.Fatalf("%s delivery was not blocked: %s", status, recorder.Body.String())
+			}
+		})
 	}
 }
 
