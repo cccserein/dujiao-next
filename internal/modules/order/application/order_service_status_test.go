@@ -147,15 +147,26 @@ func TestUpdateOrderStatusRejectsManualPaidTransition(t *testing.T) {
 	}
 	svc := NewOrderService(OrderServiceOptions{OrderStore: ordergormstore.New(db, "test-guest-credential-secret-with-32-bytes")})
 
-	if _, err := svc.UpdateOrderStatus(order.ID, constants.OrderStatusPaid); err != ErrOrderStatusInvalid {
-		t.Fatalf("manual paid transition error = %v, want %v", err, ErrOrderStatusInvalid)
-	}
-	var stored orderdomain.Order
-	if err := db.First(&stored, order.ID).Error; err != nil {
-		t.Fatalf("reload order failed: %v", err)
-	}
-	if stored.Status != constants.OrderStatusPendingPayment || stored.PaidAt != nil {
-		t.Fatalf("manual paid transition mutated order: %+v", stored)
+	for _, target := range []string{
+		constants.OrderStatusPaid,
+		" paid ",
+		constants.OrderStatusFulfilling,
+		constants.OrderStatusPartiallyDelivered,
+		constants.OrderStatusDelivered,
+		constants.OrderStatusCompleted,
+	} {
+		t.Run(target, func(t *testing.T) {
+			if _, err := svc.UpdateOrderStatus(order.ID, target); err != ErrOrderStatusInvalid {
+				t.Fatalf("manual status transition to %q error = %v, want %v", target, err, ErrOrderStatusInvalid)
+			}
+			var stored orderdomain.Order
+			if err := db.First(&stored, order.ID).Error; err != nil {
+				t.Fatalf("reload order failed: %v", err)
+			}
+			if stored.Status != constants.OrderStatusPendingPayment || stored.PaidAt != nil {
+				t.Fatalf("manual status transition to %q mutated order: %+v", target, stored)
+			}
+		})
 	}
 }
 
