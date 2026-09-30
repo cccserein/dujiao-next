@@ -1276,6 +1276,8 @@ func TestForgedCallbackFactsLeaveOrderUnpaid(t *testing.T) {
 		{"zero amount", func(in *PaymentCallbackInput) { in.Amount = money.FromDecimal(decimal.Zero) }, ErrPaymentAmountMismatch},
 		{"negative amount", func(in *PaymentCallbackInput) { in.Amount = money.FromDecimal(decimal.NewFromInt(-15)) }, ErrPaymentAmountMismatch},
 		{"forged smaller amount", func(in *PaymentCallbackInput) { in.Amount = money.FromDecimal(decimal.NewFromInt(1)) }, ErrPaymentAmountMismatch},
+		{"one cent underpaid", func(in *PaymentCallbackInput) { in.Amount = money.FromDecimal(decimal.RequireFromString("14.99")) }, ErrPaymentAmountMismatch},
+		{"one cent overpaid", func(in *PaymentCallbackInput) { in.Amount = money.FromDecimal(decimal.RequireFromString("15.01")) }, ErrPaymentAmountMismatch},
 		{"missing currency", func(in *PaymentCallbackInput) { in.Currency = "" }, ErrPaymentCurrencyMismatch},
 		{"wrong currency", func(in *PaymentCallbackInput) { in.Currency = "USD" }, ErrPaymentCurrencyMismatch},
 		{"confusable currency", func(in *PaymentCallbackInput) { in.Currency = "CＮY" }, ErrPaymentCurrencyMismatch},
