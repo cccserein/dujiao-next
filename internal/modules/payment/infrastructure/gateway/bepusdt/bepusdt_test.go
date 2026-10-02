@@ -57,6 +57,14 @@ func TestVerifyCallbackRejectsReusedSignatureForDifferentOrderOrStatus(t *testin
 		{"different token", func(data *CallbackData) { data.Token = "attacker-token" }},
 		{"different actual amount", func(data *CallbackData) { data.ActualAmount = 1.0 }},
 		{"pending status", func(data *CallbackData) { data.Status = StatusWaiting }},
+		{"smuggled order id in chain transaction", func(data *CallbackData) {
+			data.BlockTransactionID += "&order_id=" + data.OrderID
+			data.OrderID = ""
+		}},
+		{"smuggled trade id in token", func(data *CallbackData) {
+			data.Token += "&trade_id=" + data.TradeID
+			data.TradeID = ""
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			forged := original
@@ -65,6 +73,24 @@ func TestVerifyCallbackRejectsReusedSignatureForDifferentOrderOrStatus(t *testin
 				t.Fatal("reused signature accepted modified callback")
 			}
 		})
+	}
+}
+
+func TestVerifyCallbackRejectsSignedDelimiterInIdentifier(t *testing.T) {
+	cfg := &Config{AuthToken: "sandbox-secret"}
+	callback := &CallbackData{
+		TradeID: "synthetic-trade", OrderID: "synthetic-order",
+		Amount: 111.0, ActualAmount: 15.0, Token: "synthetic-token",
+		BlockTransactionID: "synthetic-chain-tx&order_id=attacker-order", Status: StatusSuccess,
+	}
+	callback.Signature = Sign(map[string]interface{}{
+		"trade_id": callback.TradeID, "order_id": callback.OrderID,
+		"amount": callback.GetAmount(), "actual_amount": callback.GetActualAmount(),
+		"token": callback.Token, "block_transaction_id": callback.BlockTransactionID,
+		"status": callback.Status,
+	}, cfg.AuthToken)
+	if err := VerifyCallback(cfg, callback); !errors.Is(err, ErrResponseInvalid) {
+		t.Fatalf("signed delimiter in callback identifier must be rejected, got %v", err)
 	}
 }
 

@@ -353,6 +353,14 @@ func VerifyCallback(cfg *Config, data *CallbackData) error {
 	if data.Status != StatusSuccess {
 		return fmt.Errorf("%w: %s", ErrResponseInvalid, bepusdtStatusSuccessMsg)
 	}
+	// The gateway signs an unescaped key=value&... string and omits empty fields.
+	// Require both payment identifiers and reject delimiter injection before
+	// comparing signatures, or a signed field can be moved into its predecessor.
+	if strings.TrimSpace(data.TradeID) == "" || strings.TrimSpace(data.OrderID) == "" ||
+		strings.Contains(data.TradeID, "&") || strings.Contains(data.OrderID, "&") ||
+		strings.Contains(data.Token, "&") || strings.Contains(data.BlockTransactionID, "&") {
+		return ErrResponseInvalid
+	}
 
 	params := map[string]interface{}{
 		"trade_id":             data.TradeID,
