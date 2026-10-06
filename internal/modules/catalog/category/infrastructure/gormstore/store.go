@@ -2,6 +2,7 @@ package gormstore
 
 import (
 	"errors"
+	"strconv"
 	"time"
 
 	productdomain "github.com/dujiao-next/internal/modules/catalog/product/domain"
@@ -44,11 +45,13 @@ func (r *CategoryStore) ListActive() ([]categorydomain.Category, error) {
 
 // GetByID 根据 ID 获取分类
 func (r *CategoryStore) GetByID(id string) (*categorydomain.Category, error) {
+	pk, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return nil, nil
+	}
 	var category categorydomain.Category
 	if err := r.db.Where("deleted_at IS NULL").
-		// 安全加固：显式参数化主键条件，防 GORM First(&x, id) 对非数字
-		// string 主键当原生 SQL 执行导致的 SQL 注入。
-		Where("id = ?", id).
+		Where("id = ?", pk).
 		First(&category).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
