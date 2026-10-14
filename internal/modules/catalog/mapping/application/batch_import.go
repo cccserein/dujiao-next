@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dujiao-next/internal/cache"
 	"time"
 
 	mappingcontract "github.com/dujiao-next/internal/modules/catalog/mapping/contract"
@@ -16,6 +17,22 @@ import (
 	"github.com/dujiao-next/internal/shared/jsonmap"
 	"github.com/dujiao-next/internal/upstream"
 )
+
+// acquireBatchImportLock 同一连接同时只允许一个批量导入：大批量导入常超过 HTTP 超时，
+// 管理员重试时后台仍在跑上一批，并发导入会产生重复商品。
+func acquireBatchImportLock(connectionID uint) (func(), error) {
+	ctx := context.Background()
+	key := fmt.Sprintf("mapping:batch_import:%d", connectionID)
+	locked, err := cache.SetNX(ctx, key, "1", 2*time.Hour)
+	if err != nil {
+		// Redis 不可用时降级为不加锁
+		return func() {}, nil
+	}
+	if !locked {
+		return nil, mappingcontract.ErrBatchImportInProgress
+	}
+	return func() { _ = cache.Del(ctx, key) }, nil
+}
 
 // BatchUpstreamProductImportOutcome 单个商品批量导入结果（供 handler 组装响应）
 type BatchUpstreamProductImportOutcome struct {
@@ -36,6 +53,11 @@ func (s *Service) BatchImportUpstreamProducts(
 	if len(upstreamProductIDs) == 0 {
 		return nil, nil
 	}
+	release, err := acquireBatchImportLock(connectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	var catMap map[uint]upstream.UpstreamCategory
 	if autoCreateCategory && categoryID == 0 {
@@ -90,6 +112,11 @@ func (s *Service) BatchImportByCategory(
 	autoCreateCategory bool,
 	localCategoryID uint,
 ) (*BatchImportByCategoryResult, error) {
+	release, err := acquireBatchImportLock(connectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	conn, err := s.connections.GetByID(connectionID)
 	if err != nil {
 		return nil, err

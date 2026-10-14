@@ -3,6 +3,7 @@ package gormstore
 import (
 	"context"
 	"errors"
+	"github.com/dujiao-next/internal/persistence/gormutil"
 	"strconv"
 	"strings"
 	"time"
@@ -37,15 +38,15 @@ func (s *BannerStore) List(ctx context.Context, query contract.BannerQuery) ([]d
 	}
 	if search := strings.TrimSpace(query.Search); search != "" {
 		like := "%" + search + "%"
-		condition, argCount := buildLocalizedLikeCondition(db, []string{"name"}, []string{"title_json"})
-		statement = statement.Where(condition, repeatLikeArgs(like, argCount)...)
+		condition, argCount := gormutil.BuildLocalizedLikeCondition(db, []string{"name"}, []string{"title_json"})
+		statement = statement.Where(condition, gormutil.RepeatLikeArgs(like, argCount)...)
 	}
 
 	var total int64
 	if err := statement.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	statement = applyPagination(statement, query.Page, query.PageSize)
+	statement = gormutil.ApplyPagination(statement, query.Page, query.PageSize)
 	if err := statement.Order("sort_order DESC, created_at DESC").Find(&banners).Error; err != nil {
 		return nil, 0, err
 	}

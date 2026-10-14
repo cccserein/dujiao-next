@@ -94,7 +94,13 @@ func (r *ProductStore) List(filter productcontract.ListFilter) ([]productdomain.
 	}
 
 	if filter.UpdatedAfter != nil {
-		query = query.Where("updated_at > ?", *filter.UpdatedAfter)
+		// 库存变化落在 SKU（人工库存预占/售出）与卡密行上，不会改动商品行本身；
+		// 下游增量同步依赖此过滤，需一并纳入，否则库存变化要等每日全量同步才可见。
+		after := *filter.UpdatedAfter
+		query = query.Where("(products.updated_at > ? OR "+
+			"EXISTS (SELECT 1 FROM product_skus ps WHERE ps.product_id = products.id AND ps.updated_at > ?) OR "+
+			"EXISTS (SELECT 1 FROM card_secrets cs WHERE cs.product_id = products.id AND cs.updated_at > ?))",
+			after, after, after)
 	}
 
 	stockStatus := strings.ToLower(strings.TrimSpace(filter.StockStatus))
@@ -287,10 +293,10 @@ func (r *ProductStore) Delete(id string) error {
 	return r.db.Model(&productdomain.Product{}).Where("id = ? AND deleted_at IS NULL", id).Update("deleted_at", time.Now()).Error
 }
 
-// CountBySlug 统计 slug 数量
+// CountBySlug 统计 slug 数量（含软删除记录：products.slug 唯一索引同样约束已删除商品）
 func (r *ProductStore) CountBySlug(slug string, excludeID *string) (int64, error) {
 	var count int64
-	query := r.db.Model(&productdomain.Product{}).Where("deleted_at IS NULL AND slug = ?", slug)
+	query := r.db.Model(&productdomain.Product{}).Where("slug = ?", slug)
 	if excludeID != nil {
 		query = query.Where("id != ?", *excludeID)
 	}

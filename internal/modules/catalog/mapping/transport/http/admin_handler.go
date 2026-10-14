@@ -204,6 +204,10 @@ func (h *AdminHandler) BatchImportUpstreamProducts(c *gin.Context) {
 			ginutil.RespondError(c, response.CodeNotFound, "error.connection_not_found", nil)
 			return
 		}
+		if errors.Is(err, mappingcontract.ErrBatchImportInProgress) {
+			ginutil.RespondError(c, response.CodeBadRequest, "error.mapping_batch_import_in_progress", nil)
+			return
+		}
 		ginutil.RespondError(c, response.CodeInternal, "error.mapping_import_failed", err)
 		return
 	}
@@ -470,6 +474,10 @@ func (h *AdminHandler) BatchImportByCategory(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, siteconnectioncontract.ErrNotFound) {
 			ginutil.RespondError(c, response.CodeNotFound, "error.connection_not_found", nil)
+			return
+		}
+		if errors.Is(err, mappingcontract.ErrBatchImportInProgress) {
+			ginutil.RespondError(c, response.CodeBadRequest, "error.mapping_batch_import_in_progress", nil)
 			return
 		}
 		ginutil.RespondError(c, response.CodeInternal, "error.category_import_failed", err)

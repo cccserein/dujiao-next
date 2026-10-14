@@ -213,3 +213,59 @@ func TestProductServiceUpdateWithEmptySKUsCollapsesToSingleSpec(t *testing.T) {
 		t.Fatalf("expected exactly one live sku row in db, got %d", rowCount)
 	}
 }
+
+// 后台打开编辑框后有买家下单预占库存，管理员只改标题保存（未提交库存）时，
+// SKU 的实时库存不能被表单里的旧值覆盖，否则会超卖。
+func TestProductServiceUpdateWithoutStockKeepsReservedSKUStock(t *testing.T) {
+	svc, db := newProductServiceForTest(t)
+	category := categorydomain.Category{Slug: "keep-stock-category", NameJSON: jsonmap.JSON{"zh-CN": "keep-stock"}}
+	if err := db.Create(&category).Error; err != nil {
+		t.Fatalf("create category failed: %v", err)
+	}
+	product := productdomain.Product{
+		CategoryID:       category.ID,
+		Slug:             "keep-stock-product",
+		TitleJSON:        jsonmap.JSON{"zh-CN": "keep-stock-product"},
+		PriceAmount:      money.FromDecimal(decimal.NewFromInt(10)),
+		PurchaseType:     constants.ProductPurchaseMember,
+		FulfillmentType:  constants.FulfillmentTypeManual,
+		ManualStockTotal: 10,
+		IsActive:         true,
+	}
+	if err := db.Create(&product).Error; err != nil {
+		t.Fatalf("create product failed: %v", err)
+	}
+	// 单规格 DEFAULT 与多规格各验证一次
+	single := productdomain.ProductSKU{ProductID: product.ID, SKUCode: productdomain.DefaultSKUCode, PriceAmount: money.FromDecimal(decimal.NewFromInt(10)), ManualStockTotal: 7, ManualStockLocked: 3, IsActive: true}
+	if err := db.Create(&single).Error; err != nil {
+		t.Fatalf("create sku failed: %v", err)
+	}
+	active := true
+	update := func(skus []productwrite.ProductSKUInput) {
+		t.Helper()
+		if _, err := svc.Write.Update(strconv.FormatUint(uint64(product.ID), 10), productwrite.CreateProductInput{
+			CategoryID:      category.ID,
+			Slug:            product.Slug,
+			TitleJSON:       map[string]interface{}{"zh-CN": "renamed"},
+			PriceAmount:     decimal.NewFromInt(10),
+			PurchaseType:    constants.ProductPurchaseMember,
+			FulfillmentType: constants.FulfillmentTypeManual,
+			SKUs:            skus,
+			IsActive:        &active,
+		}); err != nil {
+			t.Fatalf("update product failed: %v", err)
+		}
+	}
+	update(nil)
+	var reloaded productdomain.ProductSKU
+	db.First(&reloaded, single.ID)
+	if reloaded.ManualStockTotal != 7 {
+		t.Fatalf("single spec: expected live stock 7 kept, got %d", reloaded.ManualStockTotal)
+	}
+
+	update([]productwrite.ProductSKUInput{{ID: single.ID, SKUCode: "A", PriceAmount: decimal.NewFromInt(10), IsActive: &active}})
+	db.First(&reloaded, single.ID)
+	if reloaded.ManualStockTotal != 7 {
+		t.Fatalf("multi spec: expected live stock 7 kept, got %d", reloaded.ManualStockTotal)
+	}
+}

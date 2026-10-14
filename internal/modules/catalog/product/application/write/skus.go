@@ -27,7 +27,7 @@ func (s *WriteService) syncSingleProductSKU(
 	fulfillmentType string,
 	priceAmount decimal.Decimal,
 	costPriceAmount decimal.Decimal,
-	manualStockTotal int,
+	manualStockTotal *int,
 ) error {
 	if skuRepo == nil || productID == 0 {
 		return nil
@@ -43,7 +43,7 @@ func (s *WriteService) syncSingleProductSKU(
 			SpecValuesJSON:    jsonmap.JSON{},
 			PriceAmount:       money.FromDecimal(priceAmount),
 			CostPriceAmount:   money.FromDecimal(costPriceAmount),
-			ManualStockTotal:  manualStockTotal,
+			ManualStockTotal:  derefStock(manualStockTotal),
 			ManualStockLocked: 0,
 			ManualStockSold:   0,
 			IsActive:          true,
@@ -68,7 +68,10 @@ func (s *WriteService) syncSingleProductSKU(
 	target := skus[targetIndex]
 	target.PriceAmount = money.FromDecimal(priceAmount)
 	target.CostPriceAmount = money.FromDecimal(costPriceAmount)
-	target.ManualStockTotal = manualStockTotal
+	// nil 表示本次未修改库存：保留 SKU 上被下单预占后的实时值
+	if manualStockTotal != nil {
+		target.ManualStockTotal = *manualStockTotal
+	}
 	target.IsActive = true
 	target.SpecValuesJSON = jsonmap.JSON{}
 	if strings.ToUpper(strings.TrimSpace(target.SKUCode)) != strings.ToUpper(productdomain.DefaultSKUCode) {
@@ -138,6 +141,7 @@ type normalizedProductSKU struct {
 	PriceAmount      money.Amount
 	CostPriceAmount  money.Amount
 	ManualStockTotal int
+	KeepManualStock  bool // 未提交库存：落库时保留现有实时值
 	IsActive         bool
 	SortOrder        int
 }
@@ -173,18 +177,26 @@ func (s *WriteService) normalizeProductSKUInputs(inputs []ProductSKUInput, fulfi
 			return nil, decimal.Zero, 0, productcontract.ErrProductPriceInvalid
 		}
 
-		manualTotal := input.ManualStockTotal
+		var existing productdomain.ProductSKU
+		hasExisting := false
+		if existingSKUMap != nil && input.ID > 0 {
+			existing, hasExisting = existingSKUMap[input.ID]
+			if !hasExisting {
+				return nil, decimal.Zero, 0, productcontract.ErrProductSKUInvalid
+			}
+		}
+		keepManualStock := input.ManualStockTotal == nil && fulfillmentType == constants.FulfillmentTypeManual
+		manualTotal := 0
+		if input.ManualStockTotal != nil {
+			manualTotal = *input.ManualStockTotal
+		} else if hasExisting {
+			manualTotal = existing.ManualStockTotal
+		}
 		if manualTotal < constants.ManualStockUnlimited {
 			return nil, decimal.Zero, 0, productcontract.ErrManualStockInvalid
 		}
 		if fulfillmentType != constants.FulfillmentTypeManual {
 			manualTotal = 0
-		}
-		if existingSKUMap != nil && input.ID > 0 {
-			_, ok := existingSKUMap[input.ID]
-			if !ok {
-				return nil, decimal.Zero, 0, productcontract.ErrProductSKUInvalid
-			}
 		}
 
 		isActive := true
@@ -203,6 +215,7 @@ func (s *WriteService) normalizeProductSKUInputs(inputs []ProductSKUInput, fulfi
 			PriceAmount:      money.FromDecimal(priceAmount),
 			CostPriceAmount:  money.FromDecimal(costPriceAmount),
 			ManualStockTotal: manualTotal,
+			KeepManualStock:  keepManualStock,
 			IsActive:         isActive,
 			SortOrder:        input.SortOrder,
 		})
@@ -285,7 +298,9 @@ func (s *WriteService) applyProductSKUsWithStockGuard(
 			existing.SpecValuesJSON = row.SpecValuesJSON
 			existing.PriceAmount = row.PriceAmount
 			existing.CostPriceAmount = row.CostPriceAmount
-			existing.ManualStockTotal = row.ManualStockTotal
+			if !row.KeepManualStock {
+				existing.ManualStockTotal = row.ManualStockTotal
+			}
 			existing.IsActive = row.IsActive
 			existing.SortOrder = row.SortOrder
 			if err := skuRepo.Update(&existing); err != nil {
@@ -301,7 +316,9 @@ func (s *WriteService) applyProductSKUsWithStockGuard(
 			existing.SpecValuesJSON = row.SpecValuesJSON
 			existing.PriceAmount = row.PriceAmount
 			existing.CostPriceAmount = row.CostPriceAmount
-			existing.ManualStockTotal = row.ManualStockTotal
+			if !row.KeepManualStock {
+				existing.ManualStockTotal = row.ManualStockTotal
+			}
 			existing.IsActive = row.IsActive
 			existing.SortOrder = row.SortOrder
 			if err := skuRepo.Update(&existing); err != nil {
@@ -385,4 +402,11 @@ func (s *WriteService) ensureAutoSKUCardSecretStockSafe(
 		}
 	}
 	return nil
+}
+
+func derefStock(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
 }

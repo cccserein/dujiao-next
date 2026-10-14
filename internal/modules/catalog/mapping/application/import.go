@@ -24,6 +24,25 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+var importSlugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+// pickImportSlug 依次尝试 上游 slug → slug-上游ID → upstream-连接ID-上游ID-毫秒时间戳。
+func (s *Service) pickImportSlug(upstreamSlug string, connectionID, upstreamProductID uint) (string, error) {
+	upstreamSlug = strings.ToLower(strings.TrimSpace(upstreamSlug))
+	if len(upstreamSlug) <= 100 && importSlugPattern.MatchString(upstreamSlug) {
+		for _, candidate := range []string{upstreamSlug, fmt.Sprintf("%s-%d", upstreamSlug, upstreamProductID)} {
+			count, err := s.products.CountBySlug(candidate, nil)
+			if err != nil {
+				return "", err
+			}
+			if count == 0 {
+				return candidate, nil
+			}
+		}
+	}
+	return fmt.Sprintf("upstream-%d-%d-%d", connectionID, upstreamProductID, time.Now().UnixMilli()), nil
+}
+
 // ImportUpstreamProduct 从上游导入商品（克隆为本地商品 + 建立映射）
 func (s *Service) ImportUpstreamProduct(connectionID uint, upstreamProductID uint, categoryID uint, slug string) (*mappingdomain.Mapping, error) {
 	return s.importUpstreamProduct(connectionID, upstreamProductID, categoryID, slug, false, nil)
@@ -136,9 +155,12 @@ func (s *Service) importUpstreamProduct(connectionID uint, upstreamProductID uin
 		}
 	}
 
-	// 自动生成 slug（如果未提供）
+	// 未指定 slug 时优先沿用上游 slug，不可用再回退自动生成
 	if slug == "" {
-		slug = fmt.Sprintf("upstream-%d-%d-%d", connectionID, upstreamProductID, time.Now().UnixMilli())
+		slug, err = s.pickImportSlug(upProduct.Slug, connectionID, upstreamProductID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 创建本地商品

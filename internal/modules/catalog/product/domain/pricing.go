@@ -182,12 +182,6 @@ func ResolveWholesaleUnitPrice(product *Product, baseUnitPrice decimal.Decimal, 
 	return resolveWholesaleUnitPrice(product, baseUnitPrice, 0, "", quantity, quantity)
 }
 
-// ResolveWholesaleUnitPriceWithMatchQuantity 按 matchQuantity 判断批发档位，按 quantity 计算当前行优惠。
-// 商品存在多 SKU 时，批发门槛按同一商品总购买数判断，但每个订单行只计算自己的优惠金额。
-func ResolveWholesaleUnitPriceWithMatchQuantity(product *Product, baseUnitPrice decimal.Decimal, matchQuantity, quantity int) (unitPrice decimal.Decimal, discount decimal.Decimal, matched bool) {
-	return resolveWholesaleUnitPrice(product, baseUnitPrice, 0, "", matchQuantity, quantity)
-}
-
 // ResolveWholesaleUnitPriceForSKU 按指定 SKU 的批发价阶梯解析成交单价。
 func ResolveWholesaleUnitPriceForSKU(product *Product, baseUnitPrice decimal.Decimal, skuID uint, skuCode string, matchQuantity, quantity int) (unitPrice decimal.Decimal, discount decimal.Decimal, matched bool) {
 	return resolveWholesaleUnitPrice(product, baseUnitPrice, skuID, skuCode, matchQuantity, quantity)
