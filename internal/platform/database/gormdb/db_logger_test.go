@@ -43,3 +43,21 @@ func TestReleaseGORMLoggerDoesNotExposeQueryParameters(t *testing.T) {
 		t.Fatalf("release database log should retain useful query context: %s", output)
 	}
 }
+
+func TestDebugGORMLoggerDoesNotExposeQueryParameters(t *testing.T) {
+	recorder := &gormLogRecorder{}
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: newGORMLogger("debug", recorder),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+
+	secret := "must-not-appear-in-debug-database-logs"
+	if err := db.Exec("INSERT INTO missing_table (secret) VALUES (?)", secret).Error; err == nil {
+		t.Fatal("expected missing-table error")
+	}
+	if strings.Contains(recorder.String(), secret) {
+		t.Fatalf("debug database log exposed a query parameter: %s", recorder.String())
+	}
+}

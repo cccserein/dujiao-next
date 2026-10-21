@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -18,6 +19,8 @@ import (
 	affiliategormstore "github.com/dujiao-next/internal/modules/affiliate/infrastructure/gormstore"
 	orderrefund "github.com/dujiao-next/internal/modules/order/application/refund"
 	ordergormstore "github.com/dujiao-next/internal/modules/order/infrastructure/gormstore"
+	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
+	paymentgormstore "github.com/dujiao-next/internal/modules/payment/infrastructure/gormstore"
 
 	userstore "github.com/dujiao-next/internal/modules/identity/user/infrastructure/gormstore"
 
@@ -61,6 +64,7 @@ func setupAdminOrderRefundHandlerTest(t *testing.T) (*ordertransport.AdminRefund
 		&orderdomain.OrderItem{},
 		&fulfillmentdomain.Fulfillment{},
 		&orderdomain.OrderRefundRecord{},
+		&paymentdomain.Payment{},
 		&affiliatedomain.Profile{},
 		&affiliatedomain.Commission{},
 		&affiliatedomain.WithdrawRequest{},
@@ -73,10 +77,12 @@ func setupAdminOrderRefundHandlerTest(t *testing.T) (*ordertransport.AdminRefund
 	orderRepo := ordergormstore.New(db, "test-guest-credential-secret-with-32-bytes")
 	userRepo := userstore.New(db)
 	affiliateSvc := affiliateapp.NewService(affiliategormstore.New(db), nil, nil, nil, nil)
-	orderRefundService := orderrefund.New(orderRepo, userRepo, affiliateSvc, nil, nil)
+	paymentRepo := paymentgormstore.New(db, "test-guest-credential-secret-with-32-bytes")
+	orderRefundService := orderrefund.New(orderRepo, userRepo, affiliateSvc, nil, nil, paymentRepo)
 
 	return orderwiring.NewAdminRefundHandler(&container.Container{
 		OrderStore:         orderRepo,
+		PaymentStore:       paymentRepo,
 		OrderRefundService: orderRefundService,
 	}), db
 }
@@ -141,6 +147,14 @@ func seedAdminOrderRefundData(t *testing.T, db *gorm.DB) adminOrderRefundFixture
 		if err := db.Create(order).Error; err != nil {
 			t.Fatalf("create order failed: %v", err)
 		}
+	}
+	if err := db.Create(&paymentdomain.Payment{
+		OrderID: memberOrder.ID, ProviderType: constants.PaymentProviderOfficial,
+		ChannelType: constants.PaymentChannelTypeAlipay, InteractionMode: constants.PaymentInteractionRedirect,
+		Amount: money.FromDecimal(decimal.NewFromInt(100)), FeeAmount: money.FromDecimal(decimal.RequireFromString("3.00")), FeePolicy: constants.PaymentFeePolicyMerchantAbsorbed,
+		Currency: "CNY", Status: constants.PaymentStatusSuccess, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create payment failed: %v", err)
 	}
 
 	items := []orderdomain.OrderItem{
@@ -369,6 +383,58 @@ func TestGetAdminOrderRefundDetailIncludesOrderIDAndGuestEmail(t *testing.T) {
 	}
 	detailItems, ok := resp.Data["items"].([]interface{})
 	if !ok || len(detailItems) == 0 {
+		t.Fatalf("items should not be empty: %+v", resp.Data["items"])
+	}
+}
+
+func TestUpdateAdminOrderRefundPaymentFeeSupportsHistoricalManualRefund(t *testing.T) {
+	h, db := setupAdminOrderRefundHandlerTest(t)
+	fixture := seedAdminOrderRefundData(t, db)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", fixture.ManualRefundID)}}
+	c.Request = httptest.NewRequest(
+		http.MethodPatch,
+		fmt.Sprintf("/admin/order-refunds/%d/payment-fee", fixture.ManualRefundID),
+		bytes.NewBufferString(`{"payment_fee_refunded":true}`),
+	)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.UpdateAdminOrderRefundPaymentFee(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status want 200 got %d: %s", w.Code, w.Body.String())
+	}
+	var record orderdomain.OrderRefundRecord
+	if err := db.First(&record, fixture.ManualRefundID).Error; err != nil {
+		t.Fatalf("reload refund record failed: %v", err)
+	}
+	if !record.PaymentFeeRefunded || !record.PaymentFeeRefundedAmount.Decimal.Equal(decimal.RequireFromString("0.30")) {
+		t.Fatalf("unexpected updated payment fee refund: %+v", record)
+	}
+
+	var resp struct {
+		StatusCode int                    `json:"status_code"`
+		Data       map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v", err)
+	}
+	if resp.StatusCode != 0 {
+		t.Fatalf("status_code want 0 got %d", resp.StatusCode)
+	}
+	if resp.Data["order_no"] != "DJ-ADMIN-REFUND-ORDER-1" {
+		t.Fatalf("unexpected order_no: %+v", resp.Data["order_no"])
+	}
+	if resp.Data["refund_type_label"] != "manual" {
+		t.Fatalf("unexpected refund_type_label: %+v", resp.Data["refund_type_label"])
+	}
+	if resp.Data["user_email"] != "refund-member@example.com" {
+		t.Fatalf("unexpected user_email: %+v", resp.Data["user_email"])
+	}
+	items, ok := resp.Data["items"].([]interface{})
+	if !ok || len(items) == 0 {
 		t.Fatalf("items should not be empty: %+v", resp.Data["items"])
 	}
 }

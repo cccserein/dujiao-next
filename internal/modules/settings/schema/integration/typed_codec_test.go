@@ -24,6 +24,9 @@ func TestDashboardSettingCodecPreservesDefaultsAndAcceptedNumberShapes(t *testin
 			"top_products_limit": float64(8),
 			"top_channels_limit": "9",
 		},
+		"accounting": map[string]interface{}{
+			"refund_reverses_cost": "yes",
+		},
 	}, fallback)
 
 	if decoded.Alert.LowStockThreshold != 7 || decoded.Alert.OutOfStockProductsThreshold != 2 {
@@ -35,6 +38,9 @@ func TestDashboardSettingCodecPreservesDefaultsAndAcceptedNumberShapes(t *testin
 	if decoded.Ranking.TopProductsLimit != 8 || decoded.Ranking.TopChannelsLimit != 9 {
 		t.Fatalf("dashboard ranking decode mismatch: %#v", decoded.Ranking)
 	}
+	if !decoded.Accounting.RefundReversesCost {
+		t.Fatalf("dashboard accounting decode mismatch: %#v", decoded.Accounting)
+	}
 
 	encoded := settingsstorefront.EncodeDashboardSetting(decoded)
 	if !reflect.DeepEqual(encoded["alert"], map[string]interface{}{
@@ -44,6 +50,11 @@ func TestDashboardSettingCodecPreservesDefaultsAndAcceptedNumberShapes(t *testin
 		"payments_failed_threshold":        int64(10),
 	}) {
 		t.Fatalf("dashboard encode mismatch: %#v", encoded)
+	}
+	if !reflect.DeepEqual(encoded["accounting"], map[string]interface{}{
+		"refund_reverses_cost": true,
+	}) {
+		t.Fatalf("dashboard accounting encode mismatch: %#v", encoded)
 	}
 }
 
@@ -131,7 +142,7 @@ func TestUpstreamSyncCodecPreservesFallbackAndBounds(t *testing.T) {
 
 func TestTypedSettingJSONNormalizersComposeDefaultDecodeAndEncode(t *testing.T) {
 	dashboard := settingsstorefront.NormalizeDashboardSettingJSON(jsonmap.JSON{})
-	if dashboard["alert"] == nil || dashboard["ranking"] == nil {
+	if dashboard["alert"] == nil || dashboard["ranking"] == nil || dashboard["accounting"] == nil {
 		t.Fatalf("dashboard JSON normalizer omitted defaults: %#v", dashboard)
 	}
 	affiliate := NormalizeAffiliateSettingJSON(jsonmap.JSON{"commission_rate": 101})

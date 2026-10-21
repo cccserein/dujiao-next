@@ -63,15 +63,16 @@ func InitDB(driver, dsn string, pool DBPoolConfig, mode string) error {
 }
 
 func newGORMLogger(mode string, writer gormlogger.Writer) gormlogger.Interface {
-	if !strings.EqualFold(strings.TrimSpace(mode), "release") {
-		return gormlogger.Default.LogMode(gormlogger.Info)
-	}
 	if writer == nil {
 		writer = log.New(os.Stdout, "\r\n", log.LstdFlags)
 	}
+	level := gormlogger.Warn
+	if !strings.EqualFold(strings.TrimSpace(mode), "release") {
+		level = gormlogger.Info
+	}
 	return gormlogger.New(writer, gormlogger.Config{
 		SlowThreshold:             2 * time.Second,
-		LogLevel:                  gormlogger.Warn,
+		LogLevel:                  level,
 		IgnoreRecordNotFoundError: true,
 		ParameterizedQueries:      true,
 		Colorful:                  false,

@@ -2,6 +2,7 @@ package upstreamhttp
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -150,20 +151,24 @@ func (h *Handler) ListProducts(c *gin.Context) {
 
 // GetProduct GET /api/v1/upstream/products/:id
 func (h *Handler) GetProduct(c *gin.Context) {
-	id := c.Param("id")
-	if id == "" {
-		errorResponse(c, http.StatusBadRequest, "bad_request", "product id is required")
+	// 安全加固：:id 必须为纯数字正整数，拒绝任何非数字注入载荷。
+	// 历史上曾用裸 c.Param("id") 字符串透传到 GORM First(&x, id)——
+	// GORM 对非数字 string 主键会当作原生 SQL 条件执行，导致 SQL 注入
+	// 可逐字符拖出 card_secrets 卡密明文（2026-09-05 实际被盗卡事件）。
+	productID, err := ginutil.ParseParamUint(c, "id")
+	if err != nil {
+		errorResponse(c, http.StatusBadRequest, "bad_request", "invalid product id")
 		return
 	}
 
-	product, err := h.Products.GetAdminByID(id)
+	product, err := h.Products.GetAdminByID(fmt.Sprintf("%d", productID))
 	if err != nil {
 		// 商品被软删除（数据库不存在）→ 保留 product_not_found 向后兼容旧版下游 adapter
 		if errors.Is(err, ErrProductNotFound) {
 			errorResponse(c, http.StatusNotFound, "product_not_found", "product not found")
 			return
 		}
-		logger.Errorw("upstream_get_product_failed", "id", id, "error", err)
+		logger.Errorw("upstream_get_product_failed", "id", productID, "error", err)
 		errorResponse(c, http.StatusInternalServerError, "internal_error", "failed to get product")
 		return
 	}

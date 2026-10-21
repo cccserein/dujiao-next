@@ -24,16 +24,36 @@ type wechatpayAdapter struct{}
 // NewWechatpayAdapter 实例化 wechatpay adapter。
 func NewWechatpayAdapter() paymentcontract.GatewayProvider { return &wechatpayAdapter{} }
 
-// 编译期断言 wechatpayAdapter 实现了三个 capability interface。
+// 编译期断言 wechatpayAdapter 实现了支付和安全诊断 capability interface。
 var (
-	_ paymentcontract.GatewayProvider  = (*wechatpayAdapter)(nil)
-	_ paymentcontract.GatewayCapturer  = (*wechatpayAdapter)(nil)
-	_ paymentcontract.GatewayWebhooker = (*wechatpayAdapter)(nil)
+	_ paymentcontract.GatewayProvider       = (*wechatpayAdapter)(nil)
+	_ paymentcontract.GatewayCapturer       = (*wechatpayAdapter)(nil)
+	_ paymentcontract.GatewayWebhooker      = (*wechatpayAdapter)(nil)
+	_ paymentcontract.GatewaySecurityTester = (*wechatpayAdapter)(nil)
 )
 
 // Type 返回 provider 标识。
 func (a *wechatpayAdapter) Type() string {
 	return constants.PaymentProviderOfficial + ":" + constants.PaymentChannelTypeWechat
+}
+
+// TestSecurity 使用微信支付官方非交易接口验证商户请求签名及微信支付公钥应答验签。
+func (a *wechatpayAdapter) TestSecurity(ctx context.Context, raw jsonmap.JSON) (*paymentcontract.GatewaySecurityTestResult, error) {
+	cfg, err := a.parseConfig(raw, "")
+	if err != nil {
+		return nil, err
+	}
+	result, err := wechatpay.TestWechatPayPublicKey(ctx, cfg)
+	if err != nil {
+		return nil, mapWechatpayError(err)
+	}
+	return &paymentcontract.GatewaySecurityTestResult{
+		VerificationMode:         "wechatpay_public_key",
+		ResponseSerial:           result.ResponseSerial,
+		RequestSignatureAccepted: result.RequestSignatureAccepted,
+		ResponseSignatureValid:   result.ResponseSignatureValid,
+		EchoMessageMatched:       result.EchoMessageMatched,
+	}, nil
 }
 
 // parseConfig 解析并验证 wechatpay Config，把 wechatpay.ErrConfigInvalid 等映射为 provider.ErrXxx。

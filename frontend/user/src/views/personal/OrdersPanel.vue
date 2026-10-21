@@ -211,9 +211,6 @@
             <div>
               <div class="text-xs uppercase tracking-[0.16em] text-muted-foreground">{{ t('personalCenter.wallet.rechargeNoLabel') }}：{{ ro.recharge_no }}</div>
               <div class="mt-2 text-lg font-bold text-foreground">{{ formatMoney(ro.amount, ro.currency) }}</div>
-              <div v-if="ro.fee_amount && ro.fee_amount !== '0.00'" class="mt-1 text-xs text-muted-foreground">
-                {{ t('orders.rechargePayable') }}：{{ formatMoney(ro.payable_amount, ro.currency) }}
-              </div>
               <div class="mt-2 text-xs text-muted-foreground">{{ formatDate(ro.created_at) }}</div>
             </div>
 

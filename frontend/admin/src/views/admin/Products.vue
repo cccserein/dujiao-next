@@ -26,6 +26,7 @@ const { t, locale } = useI18n()
 const loading = ref(false)
 const searchQuery = ref('')
 const stockStatus = ref('all')
+const statusFilter = ref('all')
 const wholesaleStatus = ref('all')
 const categoryFilter = ref('all')
 const route = useRoute()
@@ -53,6 +54,8 @@ const pagination = reactive({
 const selectedIds = ref<Set<number>>(new Set())
 const batchOperating = ref(false)
 const batchCategoryId = ref('')
+const batchStockDisplayMode = ref('')
+const stockDisplayModes = ['exact', 'status', 'range', 'hidden']
 
 const allSelected = computed(() => products.value.length > 0 && products.value.every((p) => selectedIds.value.has(p.id)))
 
@@ -66,31 +69,35 @@ const toggleSelect = (id: number) => {
   selectedIds.value = next
 }
 
-const handleBatchStatus = async (isActive: boolean) => {
-  const ids = Array.from(selectedIds.value)
-  if (!ids.length) return
+const runBatch = async (ids: number[], call: (ids: number[]) => Promise<any>, resultKey: string) => {
   batchOperating.value = true
   try {
-    const res = await adminAPI.batchUpdateProductStatus(ids, isActive)
+    const res = await call(ids)
     const data = res.data.data as { success_count?: number } | null
-    notifySuccess(t('admin.products.batch.statusResult', { success: data?.success_count || 0, total: ids.length }))
+    notifySuccess(t(resultKey, { success: data?.success_count || 0, total: ids.length }))
     selectedIds.value = new Set()
     fetchProducts()
   } catch (err: any) { notifyError(err?.response?.data?.message || err?.message) } finally { batchOperating.value = false }
 }
 
+const handleBatchStatus = async (isActive: boolean) => {
+  const ids = Array.from(selectedIds.value)
+  if (!ids.length) return
+  await runBatch(ids, (ids) => adminAPI.batchUpdateProductStatus(ids, isActive), 'admin.products.batch.statusResult')
+}
+
 const handleBatchCategory = async () => {
   const ids = Array.from(selectedIds.value)
   if (!ids.length || !batchCategoryId.value) return
-  batchOperating.value = true
-  try {
-    const res = await adminAPI.batchUpdateProductCategory(ids, Number(batchCategoryId.value))
-    const data = res.data.data as { success_count?: number } | null
-    notifySuccess(t('admin.products.batch.categoryResult', { success: data?.success_count || 0, total: ids.length }))
-    selectedIds.value = new Set()
-    batchCategoryId.value = ''
-    fetchProducts()
-  } catch (err: any) { notifyError(err?.response?.data?.message || err?.message) } finally { batchOperating.value = false }
+  await runBatch(ids, (ids) => adminAPI.batchUpdateProductCategory(ids, Number(batchCategoryId.value)), 'admin.products.batch.categoryResult')
+  batchCategoryId.value = ''
+}
+
+const handleBatchStockDisplay = async () => {
+  const ids = Array.from(selectedIds.value)
+  if (!ids.length || !batchStockDisplayMode.value) return
+  await runBatch(ids, (ids) => adminAPI.batchUpdateProductStockDisplay(ids, batchStockDisplayMode.value), 'admin.products.batch.stockDisplayResult')
+  batchStockDisplayMode.value = ''
 }
 
 const handleBatchDelete = async () => {
@@ -98,14 +105,7 @@ const handleBatchDelete = async () => {
   if (!ids.length) return
   const confirmed = await confirmAction({ description: t('admin.products.batch.deleteConfirm', { count: ids.length }), confirmText: t('admin.common.delete'), variant: 'destructive' })
   if (!confirmed) return
-  batchOperating.value = true
-  try {
-    const res = await adminAPI.batchDeleteProducts(ids)
-    const data = res.data.data as { success_count?: number } | null
-    notifySuccess(t('admin.products.batch.deleteResult', { success: data?.success_count || 0, total: ids.length }))
-    selectedIds.value = new Set()
-    fetchProducts()
-  } catch (err: any) { notifyError(err?.response?.data?.message || err?.message) } finally { batchOperating.value = false }
+  await runBatch(ids, adminAPI.batchDeleteProducts, 'admin.products.batch.deleteResult')
 }
 
 const siteCurrency = ref('CNY')
@@ -235,6 +235,7 @@ const fetchProducts = async (options: ListFetchOptions = {}) => {
       page_size: pagination.page_size,
       search: searchQuery.value,
       stock_status: stockStatus.value,
+      is_active: statusQueryValue(),
       wholesale: wholesaleStatus.value,
       category_id: categoryFilter.value === 'all' ? undefined : categoryFilter.value,
     })
@@ -291,6 +292,13 @@ const handleSearch = () => {
 }
 const debouncedSearch = useDebounceFn(handleSearch, 300)
 
+// 上架状态三态：'all' 不下发参数，'active' → is_active=1，'inactive' → is_active=0
+const statusQueryValue = () => {
+  if (statusFilter.value === 'active') return '1'
+  if (statusFilter.value === 'inactive') return '0'
+  return undefined
+}
+
 const syncWholesaleStatusFromRoute = (value: unknown) => {
   const raw = Array.isArray(value) ? value[0] : value
   const normalized = String(raw ?? '').trim().toLowerCase()
@@ -323,6 +331,7 @@ const handleWholesaleStatusChange = () => {
 const resetFilters = () => {
   searchQuery.value = ''
   stockStatus.value = 'all'
+  statusFilter.value = 'all'
   wholesaleStatus.value = 'all'
   categoryFilter.value = 'all'
   pagination.page = 1
@@ -384,6 +393,8 @@ const toggleStatus = async (product: AdminProduct) => {
   try {
     product.is_active = newStatus
     await adminAPI.patchProduct(product.id, { is_active: newStatus })
+    // 上架状态筛选生效时，该行已不满足筛选条件，需要重新拉取以免列表与筛选结果不符
+    if (statusFilter.value !== 'all') fetchProducts({ preserveRows: true })
   } catch (err: any) {
     product.is_active = !newStatus
     if (isNotifiedError(err)) return
@@ -532,6 +543,18 @@ watch(
           </Select>
         </div>
         <div class="w-full md:w-48">
+          <Select v-model="statusFilter" @update:modelValue="handleSearch">
+            <SelectTrigger class="h-9 w-full">
+              <SelectValue :placeholder="t('admin.products.filters.statusPlaceholder')" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{{ t('admin.products.filters.statusAll') }}</SelectItem>
+              <SelectItem value="active">{{ t('admin.products.filters.statusActive') }}</SelectItem>
+              <SelectItem value="inactive">{{ t('admin.products.filters.statusInactive') }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div class="w-full md:w-48">
           <Select v-model="wholesaleStatus" @update:modelValue="handleWholesaleStatusChange">
             <SelectTrigger class="h-9 w-full">
               <SelectValue :placeholder="t('admin.products.filters.wholesalePlaceholder')" />
@@ -571,6 +594,15 @@ watch(
             </SelectContent>
           </Select>
           <Button size="sm" variant="outline" :disabled="batchOperating || !batchCategoryId" @click="handleBatchCategory">{{ t('admin.products.batch.moveCategory') }}</Button>
+        </div>
+        <div class="flex items-center gap-1">
+          <Select v-model="batchStockDisplayMode">
+            <SelectTrigger class="h-8 w-[140px] text-xs"><SelectValue :placeholder="t('admin.products.batch.stockDisplayPlaceholder')" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="mode in stockDisplayModes" :key="mode" :value="mode">{{ t(`admin.products.form.stockDisplayModes.${mode}`) }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button size="sm" variant="outline" :disabled="batchOperating || !batchStockDisplayMode" @click="handleBatchStockDisplay">{{ t('admin.products.batch.applyStockDisplay') }}</Button>
         </div>
         <Button size="sm" variant="destructive" :disabled="batchOperating" @click="handleBatchDelete">{{ t('admin.products.batch.delete') }}</Button>
       </div>

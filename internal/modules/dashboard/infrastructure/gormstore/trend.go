@@ -22,9 +22,10 @@ func (r *Store) GetOrderTrends(startAt, endAt time.Time) ([]dashboard.OrderTrend
 		COALESCE(SUM(CASE WHEN status IN (%s) THEN 1 ELSE 0 END), 0) as orders_paid
 	`, dayExpr, paidIn)
 
+	timeWhere, timeArgs := timeRangeQuery(r.db, "created_at", startAt, endAt)
 	if err := r.db.Model(&orderdomain.Order{}).
 		Select(selectSQL).
-		Where("deleted_at IS NULL AND parent_id IS NULL AND created_at >= ? AND created_at < ?", startAt, endAt).
+		Where("deleted_at IS NULL AND parent_id IS NULL AND "+timeWhere, timeArgs...).
 		Group(dayExpr).
 		Order("day ASC").
 		Scan(&rows).Error; err != nil {

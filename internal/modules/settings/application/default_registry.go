@@ -26,6 +26,7 @@ var defaultSettingRegistry = MustNewRegistry(
 	Definition{
 		Key:       constants.SettingKeySiteConfig,
 		Normalize: func(value jsonmap.JSON) jsonmap.JSON { return normalizeSiteSetting(value) },
+		Validate:  validateSiteSetting,
 		Effects:   []Effect{EffectInvalidatePublicConfigCache},
 	},
 	Definition{
@@ -83,5 +84,9 @@ var defaultSettingRegistry = MustNewRegistry(
 	Definition{
 		Key:     constants.SettingKeyWalletConfig,
 		Effects: []Effect{EffectInvalidatePublicConfigCache},
+	},
+	Definition{
+		Key:       constants.SettingKeyPaymentConfig,
+		Normalize: NormalizePaymentFeeConfig,
 	},
 )

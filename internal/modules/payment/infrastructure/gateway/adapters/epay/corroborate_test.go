@@ -39,7 +39,9 @@ func TestEpayAdapter_CorroboratePaymentNormalAndLegacyOrder(t *testing.T) {
 		t.Run(orderNo, func(t *testing.T) {
 			reply := corroborateReply()
 			reply["out_trade_no"] = orderNo
+			queryCount := 0
 			server := newCorroborateTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+				queryCount++
 				_ = r.ParseForm()
 				if r.PostForm.Get("trade_no") != "PAID-TRADE" || r.PostForm.Get("out_trade_no") != "" {
 					t.Error("must query exact trade ref")
@@ -48,9 +50,18 @@ func TestEpayAdapter_CorroboratePaymentNormalAndLegacyOrder(t *testing.T) {
 			})
 			input := corroborateInput()
 			input.OrderNo = orderNo
-			result, err := NewEpayAdapter().(paymentcontract.CallbackCorroborator).CorroboratePayment(context.Background(), corroborateChannelConfig(server.URL, "v1"), input)
+			adapter := NewEpayAdapter()
+			raw := corroborateChannelConfig(server.URL, "v1")
+			form := signEpayV1AdapterCallbackForm(map[string]string{"pid": "1001", "trade_no": "PAID-TRADE", "out_trade_no": orderNo, "money": "36.03", "trade_status": "TRADE_SUCCESS"}, "sandbox-key")
+			if _, err := adapter.(paymentcontract.GatewayCallbackVerifier).VerifyCallback(raw, form, nil); err != nil || queryCount != 0 {
+				t.Fatalf("signature verification must not duplicate gateway corroboration: queries=%d error=%v", queryCount, err)
+			}
+			result, err := adapter.(paymentcontract.CallbackCorroborator).CorroboratePayment(context.Background(), raw, input)
 			if err != nil || result.Status != constants.PaymentStatusSuccess || result.ProviderRef != "PAID-TRADE" || result.Currency != "CNY" || !result.Amount.Decimal.Equal(input.Amount.Decimal) {
 				t.Fatalf("valid/legacy query rejected: %+v %v", result, err)
+			}
+			if queryCount != 1 {
+				t.Fatalf("expected one exact attempt lookup, got %d", queryCount)
 			}
 		})
 	}

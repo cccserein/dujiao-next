@@ -2,35 +2,76 @@ package okpay
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-func TestSignPayloadMatchesDocumentExample(t *testing.T) {
-	payload := SignPayload(map[string]string{
-		"amount":       "10",
-		"callback_url": "http://127.0.0.1/callback",
-		"coin":         "USDT",
-		"name":         "test",
-		"return_url":   "http://127.0.0.1",
-		"unique_id":    "123456",
-	}, "1", "123456")
-
-	if payload["sign"] != "7465C8F4ED1BA0C8C2DB88E792374A65" {
-		t.Fatalf("unexpected sign: %s", payload["sign"])
+// TestSignPayloadMatchesOfficialVectorA 对齐官方文档 9. 测试向量 A(请求,扁平参数)。
+// 官方 base 顺序: amount, coin, id, nonce, timestamp, unique_id(ASCII 升序)。
+func TestSignPayloadMatchesOfficialVectorA(t *testing.T) {
+	pairs := []OrderedPair{
+		{Key: "amount", Value: "100.5"},
+		{Key: "coin", Value: "USDT"},
+		{Key: "id", Value: "10001"},
+		{Key: "nonce", Value: "a1b2c3d4e5"},
+		{Key: "timestamp", Value: "1782680000"},
+		{Key: "unique_id", Value: "ORDER-20260628-001"},
+	}
+	sign := buildSignature(pairs, "TESTtoken123456789abcdefghijABCD")
+	want := "7444ADFD8E4F4DA09D752DDF9345E0EE56DC25090FCFAF675DD042830E5E3F79"
+	if sign != want {
+		t.Fatalf("unexpected sign: %s, want %s", sign, want)
 	}
 }
 
-func TestVerifyCallbackMatchesDocumentExample(t *testing.T) {
-	cfg := &Config{
-		MerchantID:    "1",
-		MerchantToken: "123456",
+// TestBuildSignatureMatchesOfficialVectorB 对齐官方文档 9. 测试向量 B(回调,含嵌套 data)。
+func TestBuildSignatureMatchesOfficialVectorB(t *testing.T) {
+	pairs := []OrderedPair{
+		{Key: "code", Value: "200"},
+		{Key: "data.amount", Value: "100.5"},
+		{Key: "data.coin", Value: "USDT"},
+		{Key: "data.order_id", Value: "abc123def456"},
+		{Key: "data.pay_user_id", Value: "123456789"},
+		{Key: "data.status", Value: "1"},
+		{Key: "data.type", Value: "deposit"},
+		{Key: "data.unique_id", Value: "ORDER-20260628-001"},
+		{Key: "id", Value: "10001"},
+		{Key: "status", Value: "success"},
 	}
-	body := "code=200&data[order_id]=ac7b86615fdb137576ae35879f7ed844&data[unique_id]=BWIN-20250922152023LDVNSyxLQko&data[pay_user_id]=7238234930&data[amount]=6.00000000&data[coin]=USDT&data[status]=1&data[type]=deposit&id=1&status=success&sign=95BE540FB7D1996770E2B4CDBC6F184D"
+	sign := buildSignature(pairs, "TESTtoken123456789abcdefghijABCD")
+	want := "64B09C8847849FA6921D8FFBDF8E406D4A8EA623E53970712350F61783403F7D"
+	if sign != want {
+		t.Fatalf("unexpected sign: %s, want %s", sign, want)
+	}
+}
+
+// TestBuildSignatureMatchesOfficialVectorC 对齐官方文档 9. 测试向量 C:
+// 保留 0/"0"/false,丢弃 null/空串,点号嵌套展开。
+func TestBuildSignatureMatchesOfficialVectorC(t *testing.T) {
+	pairs := []OrderedPair{
+		{Key: "a", Value: "0"},
+		{Key: "b", Value: "0"},
+		{Key: "e", Value: "false"},
+		{Key: "f", Value: "hello"},
+		{Key: "id", Value: "7"},
+		{Key: "nest.x", Value: "1"},
+		{Key: "nest.y", Value: "2"},
+	}
+	sign := buildSignature(pairs, "TESTtoken123456789abcdefghijABCD")
+	want := "8BC0AF979075038025DDD51B6F4A2E6CF3FF9B5B5371EB2268D303F89883E92A"
+	if sign != want {
+		t.Fatalf("unexpected sign: %s, want %s", sign, want)
+	}
+}
+
+func TestVerifyCallbackMatchesOfficialVectorB(t *testing.T) {
+	cfg := &Config{
+		MerchantID:    "10001",
+		MerchantToken: "TESTtoken123456789abcdefghijABCD",
+	}
+	body := `{"status":"success","code":200,"data":{"order_id":"abc123def456","unique_id":"ORDER-20260628-001","pay_user_id":123456789,"amount":"100.5","coin":"USDT","status":1,"type":"deposit"},"id":10001,"sign":"64B09C8847849FA6921D8FFBDF8E406D4A8EA623E53970712350F61783403F7D"}`
 	data, err := ParseCallback([]byte(body))
 	if err != nil {
 		t.Fatalf("ParseCallback failed: %v", err)
@@ -41,15 +82,43 @@ func TestVerifyCallbackMatchesDocumentExample(t *testing.T) {
 	if status := ToPaymentStatus(data.RequestStatus, data.PaymentStatus); status != "success" {
 		t.Fatalf("unexpected payment status: %s", status)
 	}
+	if data.OrderID != "abc123def456" {
+		t.Fatalf("unexpected order id: %s", data.OrderID)
+	}
+	if data.UniqueID != "ORDER-20260628-001" {
+		t.Fatalf("unexpected unique id: %s", data.UniqueID)
+	}
+}
+
+func TestVerifyCallbackRejectsBadSignature(t *testing.T) {
+	cfg := &Config{
+		MerchantID:    "10001",
+		MerchantToken: "TESTtoken123456789abcdefghijABCD",
+	}
+	body := `{"status":"success","code":200,"data":{"order_id":"abc123def456","unique_id":"ORDER-20260628-001","pay_user_id":123456789,"amount":"100.5","coin":"USDT","status":1,"type":"deposit"},"id":10001,"sign":"0000000000000000000000000000000000000000000000000000000000000000"}`
+	data, err := ParseCallback([]byte(body))
+	if err != nil {
+		t.Fatalf("ParseCallback failed: %v", err)
+	}
+	if err := VerifyCallback(cfg, data); err == nil {
+		t.Fatal("expected signature mismatch error")
+	}
+}
+
+func TestParseCallbackRejectsFormEncodedBody(t *testing.T) {
+	body := "code=200&data.order_id=abc123&status=success&sign=DEADBEEF"
+	if _, err := ParseCallback([]byte(body)); err == nil {
+		t.Fatal("expected form-encoded callback to be rejected under the JSON-only protocol")
+	}
 }
 
 func TestCreatePayment(t *testing.T) {
-	var receivedBody string
+	var receivedValues map[string][]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm failed: %v", err)
 		}
-		receivedBody = r.PostForm.Encode()
+		receivedValues = map[string][]string(r.PostForm)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"success","code":200,"data":{"order_id":"OK-ORDER-1","pay_url":"https://pay.example.com/ok"}}`))
 	}))
@@ -78,54 +147,37 @@ func TestCreatePayment(t *testing.T) {
 	if result.PayURL != "https://pay.example.com/ok" {
 		t.Fatalf("unexpected pay url: %s", result.PayURL)
 	}
-	if !strings.Contains(receivedBody, "unique_id=DJP1001") {
-		t.Fatalf("request body should contain unique_id, got %s", receivedBody)
+	if receivedValues["unique_id"][0] != "DJP1001" {
+		t.Fatalf("request body should contain unique_id, got %v", receivedValues["unique_id"])
 	}
-	if !strings.Contains(receivedBody, "amount=131.60000000") {
-		t.Fatalf("request body should contain converted amount, got %s", receivedBody)
+	if receivedValues["amount"][0] != "131.60000000" {
+		t.Fatalf("request body should contain converted amount, got %v", receivedValues["amount"])
 	}
-	if !strings.Contains(receivedBody, "sign=") {
-		t.Fatalf("request body should contain sign, got %s", receivedBody)
+	if receivedValues["sign"][0] == "" {
+		t.Fatal("request body should contain sign")
 	}
-}
+	if receivedValues["timestamp"][0] == "" {
+		t.Fatal("request body should contain timestamp")
+	}
+	if receivedValues["nonce"][0] == "" {
+		t.Fatal("request body should contain nonce")
+	}
 
-func TestVerifyCallbackFallsBackToSortedKeys(t *testing.T) {
-	cfg := &Config{
-		MerchantID:    "1",
-		MerchantToken: "123456",
+	// 用收到的 timestamp/nonce 重新算一遍签名,确认服务端可逐字节复现。
+	pairs := []OrderedPair{
+		{Key: "amount", Value: receivedValues["amount"][0]},
+		{Key: "callback_url", Value: receivedValues["callback_url"][0]},
+		{Key: "coin", Value: receivedValues["coin"][0]},
+		{Key: "id", Value: receivedValues["id"][0]},
+		{Key: "name", Value: receivedValues["name"][0]},
+		{Key: "nonce", Value: receivedValues["nonce"][0]},
+		{Key: "return_url", Value: receivedValues["return_url"][0]},
+		{Key: "timestamp", Value: receivedValues["timestamp"][0]},
+		{Key: "unique_id", Value: receivedValues["unique_id"][0]},
 	}
-	bodyWithoutSign := "id=1&status=success&code=200&data[amount]=6.00000000&data[coin]=USDT&data[order_id]=ac7b86615fdb137576ae35879f7ed844&data[pay_user_id]=7238234930&data[status]=1&data[type]=deposit&data[unique_id]=BWIN-20250922152023LDVNSyxLQko"
-	sign := md5Hex("code=200&data[amount]=6.00000000&data[coin]=USDT&data[order_id]=ac7b86615fdb137576ae35879f7ed844&data[pay_user_id]=7238234930&data[status]=1&data[type]=deposit&data[unique_id]=BWIN-20250922152023LDVNSyxLQko&id=1&status=success&token=123456")
-	data, err := ParseCallback([]byte(bodyWithoutSign + "&sign=" + sign))
-	if err != nil {
-		t.Fatalf("ParseCallback failed: %v", err)
-	}
-	if err := VerifyCallback(cfg, data); err != nil {
-		t.Fatalf("VerifyCallback failed: %v", err)
-	}
-}
-
-func TestParseJSONCallbackAndVerify(t *testing.T) {
-	cfg := &Config{
-		MerchantID:    "1",
-		MerchantToken: "123456",
-	}
-	body := `{"code":200,"data":{"order_id":"ac7b86615fdb137576ae35879f7ed844","unique_id":"BWIN-20250922152023LDVNSyxLQko","pay_user_id":7238234930,"amount":"6.00000000","coin":"USDT","status":1,"type":"deposit"},"id":1,"status":"success","sign":"95BE540FB7D1996770E2B4CDBC6F184D"}`
-	data, err := ParseCallback([]byte(body))
-	if err != nil {
-		t.Fatalf("ParseCallback failed: %v", err)
-	}
-	if data.OrderID != "ac7b86615fdb137576ae35879f7ed844" {
-		t.Fatalf("unexpected order id: %s", data.OrderID)
-	}
-	if data.UniqueID != "BWIN-20250922152023LDVNSyxLQko" {
-		t.Fatalf("unexpected unique id: %s", data.UniqueID)
-	}
-	if data.PayUserID != "7238234930" {
-		t.Fatalf("unexpected pay user id: %s", data.PayUserID)
-	}
-	if err := VerifyCallback(cfg, data); err != nil {
-		t.Fatalf("VerifyCallback failed: %v", err)
+	expected := buildSignature(pairs, cfg.MerchantToken)
+	if !strings.EqualFold(expected, receivedValues["sign"][0]) {
+		t.Fatalf("signature does not match recomputed value: got %s want %s", receivedValues["sign"][0], expected)
 	}
 }
 
@@ -137,9 +189,4 @@ func TestConvertAmountByRate(t *testing.T) {
 	if converted.StringFixed(8) != "0.15000000" {
 		t.Fatalf("unexpected converted amount: %s", converted.StringFixed(8))
 	}
-}
-
-func md5Hex(raw string) string {
-	sum := md5.Sum([]byte(raw))
-	return strings.ToUpper(hex.EncodeToString(sum[:]))
 }

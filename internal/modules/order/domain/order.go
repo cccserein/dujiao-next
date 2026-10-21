@@ -3,6 +3,7 @@ package domain
 import (
 	"time"
 
+	"github.com/dujiao-next/internal/constants"
 	fulfillmentdomain "github.com/dujiao-next/internal/modules/fulfillment/domain"
 	"github.com/dujiao-next/internal/shared/money"
 )
@@ -53,6 +54,23 @@ type Order struct {
 // TableName 指定表名
 func (Order) TableName() string {
 	return "orders"
+}
+
+// CanReadFulfillment limits delivery content to orders that still have a
+// payable entitlement. Fully refunded, canceled, and unpaid orders cannot
+// retrieve previously stored card secrets.
+func (o *Order) CanReadFulfillment() bool {
+	if o == nil {
+		return false
+	}
+	switch o.Status {
+	case constants.OrderStatusPaid, constants.OrderStatusFulfilling,
+		constants.OrderStatusPartiallyDelivered, constants.OrderStatusPartiallyRefunded,
+		constants.OrderStatusDelivered, constants.OrderStatusCompleted:
+		return true
+	default:
+		return false
+	}
 }
 
 // StripCostPrice 清除订单项中的成本价信息，避免前台用户看到成本价。

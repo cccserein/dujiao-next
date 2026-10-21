@@ -1,6 +1,7 @@
 package application
 
 import (
+	"github.com/dujiao-next/internal/constants"
 	"testing"
 	"time"
 
@@ -135,5 +136,26 @@ func TestIsRetryableErrorCode(t *testing.T) {
 	// 测试带空格的情况
 	if isRetryableErrorCode("  unauthorized  ") {
 		t.Error("expected trimmed 'unauthorized' to be non-retryable")
+	}
+}
+
+func TestIsUpstreamTransitionAllowed(t *testing.T) {
+	for _, tc := range []struct {
+		current, upstream string
+		want              bool
+	}{
+		{constants.ProcurementStatusAccepted, "delivered", true},
+		{constants.ProcurementStatusPartiallyRefunded, "delivered", true},
+		{constants.ProcurementStatusFulfilled, "delivered", false},
+		{constants.ProcurementStatusRefunded, "delivered", false},
+		{constants.ProcurementStatusCanceled, "delivered", false},
+		{constants.ProcurementStatusFulfilled, "canceled", false},
+		{constants.ProcurementStatusAccepted, "canceled", true},
+		{constants.ProcurementStatusAccepted, "partially_refunded", true},
+		{constants.ProcurementStatusFulfilled, "refunded", true},
+	} {
+		if got := isUpstreamTransitionAllowed(tc.current, tc.upstream); got != tc.want {
+			t.Errorf("(%s -> %s) = %v, want %v", tc.current, tc.upstream, got, tc.want)
+		}
 	}
 }

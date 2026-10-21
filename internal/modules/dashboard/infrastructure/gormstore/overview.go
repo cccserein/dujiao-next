@@ -47,9 +47,10 @@ func (r *Store) GetOverview(startAt, endAt time.Time) (dashboard.OverviewRow, er
 		COALESCE(SUM(CASE WHEN status IN (%s) THEN total_amount ELSE 0 END), 0) as gmv_paid
 	`, paidIn, constants.OrderStatusCompleted, constants.OrderStatusPendingPayment, processingIn, paidIn)
 
+	timeWhere, timeArgs := timeRangeQuery(r.db, "created_at", startAt, endAt)
 	if err := r.db.Model(&orderdomain.Order{}).
 		Select(orderSelectSQL).
-		Where("deleted_at IS NULL AND parent_id IS NULL AND created_at >= ? AND created_at < ?", startAt, endAt).
+		Where("deleted_at IS NULL AND parent_id IS NULL AND "+timeWhere, timeArgs...).
 		Scan(&orderAgg).Error; err != nil {
 		return result, err
 	}
@@ -87,14 +88,22 @@ func (r *Store) GetOverview(startAt, endAt time.Time) (dashboard.OverviewRow, er
 		return result, err
 	}
 
+	timeWhere2, timeArgs2 := timeRangeQuery(r.db, "created_at", startAt, endAt)
+	if err := r.db.Model(&userdomain.User{}).
+		Where("deleted_at IS NULL AND "+timeWhere2, timeArgs2...).
+		Count(&result.NewUsers).Error; err != nil {
+		return result, err
+	}
+
 	if err := r.db.Model(&productdomain.Product{}).
 		Where("deleted_at IS NULL AND is_active = ?", true).
 		Count(&result.ActiveProducts).Error; err != nil {
 		return result, err
 	}
 
+	timeWhere3, timeArgs3 := timeRangeQuery(r.db, "created_at", startAt, endAt)
 	_ = r.db.Model(&orderdomain.Order{}).
-		Where("deleted_at IS NULL AND parent_id IS NULL AND created_at >= ? AND created_at < ? AND currency <> ''", startAt, endAt).
+		Where("deleted_at IS NULL AND parent_id IS NULL AND "+timeWhere3+" AND currency <> ''", timeArgs3...).
 		Order("id DESC").
 		Limit(1).
 		Pluck("currency", &result.Currency).Error
@@ -114,8 +123,9 @@ func (r *Store) GetOverview(startAt, endAt time.Time) (dashboard.OverviewRow, er
 func (r *Store) GetPaymentOrderAlertCounts(startAt, endAt time.Time) (dashboard.PaymentOrderAlertCountsRow, error) {
 	result := dashboard.PaymentOrderAlertCountsRow{}
 
+	timeWhere, timeArgs := timeRangeQuery(r.db, "created_at", startAt, endAt)
 	if err := r.db.Model(&orderdomain.Order{}).
-		Where("deleted_at IS NULL AND parent_id IS NULL AND status = ? AND created_at >= ? AND created_at < ?", constants.OrderStatusPendingPayment, startAt, endAt).
+		Where("deleted_at IS NULL AND parent_id IS NULL AND status = ? AND "+timeWhere, append([]interface{}{constants.OrderStatusPendingPayment}, timeArgs...)...).
 		Count(&result.PendingPaymentOrders).Error; err != nil {
 		return result, err
 	}

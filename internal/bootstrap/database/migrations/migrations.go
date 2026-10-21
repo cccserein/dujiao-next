@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dujiao-next/internal/constants"
 	cardsecretdomain "github.com/dujiao-next/internal/modules/cardsecret/domain"
 	cartdomain "github.com/dujiao-next/internal/modules/cart/domain"
 	externalidentitydomain "github.com/dujiao-next/internal/modules/identity/externalidentity/domain"
@@ -18,6 +19,8 @@ import (
 	settingsstore "github.com/dujiao-next/internal/modules/settings/infrastructure/gormstore"
 	"github.com/dujiao-next/internal/platform/database/gormdb"
 	"github.com/dujiao-next/internal/shared/jsonmap"
+	"github.com/dujiao-next/internal/shared/money"
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
@@ -27,6 +30,8 @@ const (
 	categoryParentMigrationSettingKey               = "migration/category_parent_v1"
 	paymentProviderBepusdtRenameMigrationSettingKey = "migration/payment_provider_bepusdt_rename_v1"
 	paymentChannelBepusdtConfigMigrationSettingKey  = "migration/payment_channel_bepusdt_config_v2"
+	paymentFeePolicyMigrationSettingKey             = "migration/payment_fee_policy_v1"
+	orderRefundPaymentFeeMigrationSettingKey        = "migration/order_refund_payment_fee_v1"
 	orderItemOriginalPriceMigrationKey              = "migration/order_item_original_price_v1"
 	manualStockUnlimitedValue                       = -1
 	cartProductForeignKeyConstraint                 = "fk_cart_items_product"
@@ -211,6 +216,176 @@ func migrationDone(value jsonmap.JSON) bool {
 	}
 	flag, ok := done.(bool)
 	return ok && flag
+}
+
+// ensurePaymentFeePolicyMigration 为升级前的支付记录补充不可变手续费策略快照。
+// 旧版本只在 fee_amount 中记录手续费，且实际向用户加收，因此非零记录明确标为 legacy。
+func ensurePaymentFeePolicyMigration() error {
+	if gormdb.DB == nil {
+		return errors.New("database is not initialized")
+	}
+
+	var marker settingsstore.SettingRecord
+	if err := gormdb.DB.First(&marker, "key = ?", paymentFeePolicyMigrationSettingKey).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+	} else if migrationDone(marker.ValueJSON) {
+		return nil
+	}
+
+	return gormdb.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&paymentdomain.Payment{}).
+			Where("fee_amount > 0 AND (fee_policy IS NULL OR fee_policy = '' OR fee_policy = ?)", constants.PaymentFeePolicyNone).
+			Update("fee_policy", constants.PaymentFeePolicyLegacyCustomerSurcharge).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&paymentdomain.Payment{}).
+			Where("fee_amount = 0 AND (fee_policy IS NULL OR fee_policy = '')").
+			Update("fee_policy", constants.PaymentFeePolicyNone).Error; err != nil {
+			return err
+		}
+
+		marker := settingsstore.SettingRecord{
+			Key: paymentFeePolicyMigrationSettingKey,
+			ValueJSON: jsonmap.JSON{
+				"done":        true,
+				"migrated_at": time.Now().UTC().Format(time.RFC3339),
+			},
+		}
+		return tx.Save(&marker).Error
+	})
+}
+
+// ensureOrderRefundPaymentFeeMigration backfills manual refunds created before
+// the per-refund accounting flag existed. Only merchant-absorbed fee snapshots
+// are considered; legacy customer surcharges remain outside merchant costs.
+func ensureOrderRefundPaymentFeeMigration() error {
+	if gormdb.DB == nil {
+		return errors.New("database is not initialized")
+	}
+
+	var marker settingsstore.SettingRecord
+	if err := gormdb.DB.First(&marker, "key = ?", orderRefundPaymentFeeMigrationSettingKey).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+	} else if migrationDone(marker.ValueJSON) {
+		return nil
+	}
+
+	return gormdb.DB.Transaction(func(tx *gorm.DB) error {
+		var payments []paymentdomain.Payment
+		if err := tx.Where(
+			"deleted_at IS NULL AND status = ? AND provider_type <> ? AND fee_policy = ? AND fee_amount > 0 AND (exception_code IS NULL OR exception_code = '')",
+			constants.PaymentStatusSuccess,
+			constants.PaymentProviderWallet,
+			constants.PaymentFeePolicyMerchantAbsorbed,
+		).Find(&payments).Error; err != nil {
+			return err
+		}
+
+		type paymentFeeSnapshot struct {
+			Amount decimal.Decimal
+			Fee    decimal.Decimal
+		}
+		paymentFees := make(map[uint]paymentFeeSnapshot)
+		for _, payment := range payments {
+			amount := payment.Amount.Decimal.Round(2)
+			fee := payment.FeeAmount.Decimal.Round(2)
+			if amount.LessThanOrEqual(decimal.Zero) || fee.LessThanOrEqual(decimal.Zero) {
+				continue
+			}
+			snapshot := paymentFees[payment.OrderID]
+			snapshot.Amount = snapshot.Amount.Add(amount)
+			snapshot.Fee = snapshot.Fee.Add(fee)
+			paymentFees[payment.OrderID] = snapshot
+		}
+
+		var records []orderdomain.OrderRefundRecord
+		if err := tx.Where("deleted_at IS NULL AND type = ?", constants.OrderRefundTypeManual).
+			Order("created_at ASC, id ASC").
+			Find(&records).Error; err != nil {
+			return err
+		}
+		orderIDs := make([]uint, 0, len(records))
+		seenOrderIDs := make(map[uint]struct{}, len(records))
+		for _, record := range records {
+			if _, exists := seenOrderIDs[record.OrderID]; exists {
+				continue
+			}
+			seenOrderIDs[record.OrderID] = struct{}{}
+			orderIDs = append(orderIDs, record.OrderID)
+		}
+		type refundOrder struct {
+			ID       uint
+			ParentID *uint
+		}
+		var orders []refundOrder
+		if len(orderIDs) > 0 {
+			if err := tx.Model(&orderdomain.Order{}).
+				Select("id", "parent_id").
+				Where("deleted_at IS NULL AND id IN ?", orderIDs).
+				Find(&orders).Error; err != nil {
+				return err
+			}
+		}
+		rootByOrderID := make(map[uint]uint, len(orders))
+		for _, order := range orders {
+			rootID := order.ID
+			if order.ParentID != nil && *order.ParentID > 0 {
+				rootID = *order.ParentID
+			}
+			rootByOrderID[order.ID] = rootID
+		}
+
+		type refundFeeState struct {
+			Principal decimal.Decimal
+			Fee       decimal.Decimal
+		}
+		states := make(map[uint]refundFeeState)
+		migratedCount := 0
+		for _, record := range records {
+			rootID := rootByOrderID[record.OrderID]
+			snapshot, exists := paymentFees[rootID]
+			if !exists {
+				continue
+			}
+			state := states[rootID]
+			feeRefunded := orderdomain.CalculatePaymentFeeRefundAmount(
+				snapshot.Amount,
+				snapshot.Fee,
+				state.Principal,
+				state.Fee,
+				record.Amount.Decimal,
+			)
+			if err := tx.Model(&orderdomain.OrderRefundRecord{}).
+				Where("id = ?", record.ID).
+				Updates(map[string]interface{}{
+					"payment_fee_refunded":        true,
+					"payment_fee_refunded_amount": money.FromDecimal(feeRefunded),
+				}).Error; err != nil {
+				return err
+			}
+			state.Principal = state.Principal.Add(record.Amount.Decimal)
+			if state.Principal.GreaterThan(snapshot.Amount) {
+				state.Principal = snapshot.Amount
+			}
+			state.Fee = state.Fee.Add(feeRefunded)
+			states[rootID] = state
+			migratedCount++
+		}
+
+		migrationMarker := settingsstore.SettingRecord{
+			Key: orderRefundPaymentFeeMigrationSettingKey,
+			ValueJSON: jsonmap.JSON{
+				"done":           true,
+				"migrated_at":    time.Now().UTC().Format(time.RFC3339),
+				"migrated_count": migratedCount,
+			},
+		}
+		return tx.Save(&migrationMarker).Error
+	})
 }
 
 // ensureOrderItemOriginalPriceMigration 为历史订单项回填原价快照。

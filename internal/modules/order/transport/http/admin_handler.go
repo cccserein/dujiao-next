@@ -86,6 +86,12 @@ type AdminHandler struct {
 	promotions PromotionLookup
 	payments   PaymentDirectory
 	channels   PaymentChannelDirectory
+	authorizer AdminSecretAuthorizer
+}
+
+// AdminSecretAuthorizer checks whether an administrator may read card secrets.
+type AdminSecretAuthorizer interface {
+	EnforceAdmin(adminID uint, object, action string) (bool, error)
 }
 
 func NewAdminHandler(
@@ -95,8 +101,9 @@ func NewAdminHandler(
 	promotions PromotionLookup,
 	payments PaymentDirectory,
 	channels PaymentChannelDirectory,
+	authorizer AdminSecretAuthorizer,
 ) *AdminHandler {
-	if orders == nil || users == nil || coupons == nil || promotions == nil || payments == nil || channels == nil {
+	if orders == nil || users == nil || coupons == nil || promotions == nil || payments == nil || channels == nil || authorizer == nil {
 		panic("order admin handler: required dependency is nil")
 	}
 	return &AdminHandler{
@@ -106,6 +113,7 @@ func NewAdminHandler(
 		promotions: promotions,
 		payments:   payments,
 		channels:   channels,
+		authorizer: authorizer,
 	}
 }
 
@@ -201,6 +209,7 @@ func (h *AdminHandler) AdminListOrders(c *gin.Context) {
 
 	items := make([]AdminOrderListItem, 0, len(orders))
 	for _, order := range orders {
+		maskOrderFulfillment(&order)
 		var email, displayName string
 		if user, ok := userMap[order.UserID]; ok {
 			email = user.Email
@@ -213,6 +222,7 @@ func (h *AdminHandler) AdminListOrders(c *gin.Context) {
 		})
 	}
 
+	c.Header("Cache-Control", "no-store")
 	response.SuccessWithPage(c, items, pagination)
 }
 
@@ -349,7 +359,24 @@ func (h *AdminHandler) AdminGetOrder(c *gin.Context) {
 		})
 	}
 
-	order.TruncateFulfillmentPayload()
+	adminID, ok := ginutil.GetAdminID(c)
+	if !ok {
+		return
+	}
+	canReadSecrets := ginutil.IsSuperAdmin(c)
+	if !canReadSecrets {
+		canReadSecrets, err = h.authorizer.EnforceAdmin(adminID, "/admin/card-secrets", "GET")
+		if err != nil {
+			ginutil.RespondError(c, response.CodeInternal, "error.order_fetch_failed", err)
+			return
+		}
+	}
+	if canReadSecrets {
+		order.TruncateFulfillmentPayload()
+	} else {
+		maskOrderFulfillment(order)
+	}
+	c.Header("Cache-Control", "no-store")
 	response.Success(c, AdminOrderDetail{
 		Order:           *order,
 		UserEmail:       email,
@@ -358,6 +385,22 @@ func (h *AdminHandler) AdminGetOrder(c *gin.Context) {
 		PromotionName:   promotionName,
 		Payments:        paymentItems,
 	})
+}
+
+// Keep fulfillment status for the admin UI, but never include delivery data in
+// an order list or a detail response without card-secret read permission.
+func maskOrderFulfillment(order *orderdomain.Order) {
+	if order == nil {
+		return
+	}
+	if order.Fulfillment != nil {
+		order.Fulfillment.Payload = ""
+		order.Fulfillment.LogisticsJSON = nil
+		order.Fulfillment.PayloadLineCount = 0
+	}
+	for i := range order.Children {
+		maskOrderFulfillment(&order.Children[i])
+	}
 }
 
 func (h *AdminHandler) resolvePaymentChannelNames(payments []paymentdomain.Payment) (map[uint]string, error) {

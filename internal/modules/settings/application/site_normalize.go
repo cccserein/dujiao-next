@@ -1,10 +1,12 @@
 package settingsapp
 
 import (
+	settingsvalue "github.com/dujiao-next/internal/modules/settings/schema/value"
 	"regexp"
 	"strings"
 
 	"github.com/dujiao-next/internal/constants"
+	"github.com/dujiao-next/internal/shared/contactlink"
 	"github.com/dujiao-next/internal/shared/jsonmap"
 )
 
@@ -78,7 +80,7 @@ func normalizeSiteScripts(raw interface{}) []interface{} {
 
 		result = append(result, map[string]interface{}{
 			"name":     normalizeSettingTextWithRuneLimit(itemMap["name"], settingSiteScriptNameMaxRuneSize),
-			"enabled":  parseSettingBool(itemMap["enabled"]),
+			"enabled":  settingsvalue.ParseBool(itemMap["enabled"]),
 			"position": position,
 			"code":     code,
 		})
@@ -138,11 +140,34 @@ func normalizeSiteContact(raw interface{}) map[string]interface{} {
 	return result
 }
 
+// SettingFieldError 表示设置中某个字段校验失败，Field 供 handler 映射为 i18n 文案。
+type SettingFieldError struct {
+	Field string
+}
+
+func (e *SettingFieldError) Error() string {
+	return "setting field invalid: " + e.Field
+}
+
+// validateSiteSetting 与分销站共用客服链接规则，避免两个入口对同一值给出不同结果。
+func validateSiteSetting(value jsonmap.JSON) error {
+	contact, _ := value["contact"].(map[string]interface{})
+	if telegram, _ := contact["telegram"].(string); telegram != "" && !contactlink.IsTelegram(telegram) {
+		return &SettingFieldError{Field: "contact_telegram"}
+	}
+	if whatsApp, _ := contact["whatsapp"].(string); whatsApp != "" && !contactlink.IsWhatsApp(whatsApp) {
+		return &SettingFieldError{Field: "contact_whatsapp"}
+	}
+	return nil
+}
+
 func normalizeSiteBrand(raw interface{}) map[string]interface{} {
+	// site_logo 用于前台导航栏、页脚等页面品牌展示，与浏览器 favicon 的 site_icon 保持独立。
 	result := map[string]interface{}{
 		"site_name":        "",
 		"site_url":         "",
 		"site_icon":        "",
+		"site_logo":        "",
 		"site_description": normalizeSiteLocalizedField(nil),
 	}
 	brandMap, ok := raw.(map[string]interface{})
@@ -152,6 +177,8 @@ func normalizeSiteBrand(raw interface{}) map[string]interface{} {
 	result["site_name"] = normalizeSettingText(brandMap["site_name"])
 	result["site_url"] = strings.TrimRight(normalizeSettingText(brandMap["site_url"]), "/")
 	result["site_icon"] = normalizeSettingText(brandMap["site_icon"])
+	// 未配置 Logo 时保留空字符串，让前台继续使用各主题原有的 fallback 行为。
+	result["site_logo"] = normalizeSettingText(brandMap["site_logo"])
 	result["site_description"] = normalizeSiteLocalizedField(brandMap["site_description"])
 	return result
 }
@@ -323,7 +350,7 @@ func normalizeNavConfig(value map[string]interface{}) jsonmap.JSON {
 	if builtinRaw, ok := value["builtin"].(map[string]interface{}); ok {
 		for _, key := range []string{"blog", "notice", "about"} {
 			if raw, exists := builtinRaw[key]; exists {
-				builtin[key] = parseSettingBool(raw)
+				builtin[key] = settingsvalue.ParseBool(raw)
 			}
 		}
 	}
@@ -391,7 +418,7 @@ func normalizeNavConfig(value map[string]interface{}) jsonmap.JSON {
 				"url":        url,
 				"target":     target,
 				"sort_order": sortOrder,
-				"enabled":    parseSettingBool(itemMap["enabled"]),
+				"enabled":    settingsvalue.ParseBool(itemMap["enabled"]),
 				"icon":       icon,
 			})
 
@@ -468,25 +495,26 @@ func isValidRegistrationEmailDomain(domain string) bool {
 
 // normalizeRegistrationSetting 归一化注册配置。
 func normalizeRegistrationSetting(value map[string]interface{}) jsonmap.JSON {
-	normalized := make(jsonmap.JSON, 4)
+	normalized := make(jsonmap.JSON, 5)
 	registrationEnabled := true
 	if raw, ok := value[constants.SettingFieldRegistrationEnabled]; ok {
-		registrationEnabled = parseSettingBool(raw)
+		registrationEnabled = settingsvalue.ParseBool(raw)
 	}
 	normalized[constants.SettingFieldRegistrationEnabled] = registrationEnabled
 
 	emailVerificationEnabled := true
 	if raw, ok := value[constants.SettingFieldEmailVerificationEnabled]; ok {
-		emailVerificationEnabled = parseSettingBool(raw)
+		emailVerificationEnabled = settingsvalue.ParseBool(raw)
 	}
 	normalized[constants.SettingFieldEmailVerificationEnabled] = emailVerificationEnabled
 
 	emailDomainAllowlistEnabled := false
 	if raw, ok := value[constants.SettingFieldEmailDomainAllowlistEnabled]; ok {
-		emailDomainAllowlistEnabled = parseSettingBool(raw)
+		emailDomainAllowlistEnabled = settingsvalue.ParseBool(raw)
 	}
 	normalized[constants.SettingFieldEmailDomainAllowlistEnabled] = emailDomainAllowlistEnabled
 	normalized[constants.SettingFieldAllowedEmailDomains] = normalizeRegistrationEmailDomains(value[constants.SettingFieldAllowedEmailDomains])
+	normalized[constants.SettingFieldRegistrationInviteOnly] = settingsvalue.ParseBool(value[constants.SettingFieldRegistrationInviteOnly])
 
 	return normalized
 }

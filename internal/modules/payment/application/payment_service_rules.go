@@ -16,6 +16,22 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// calculatePaymentAmounts 按创建时配置计算用户实付金额、渠道手续费及不可变策略快照。
+func calculatePaymentAmounts(baseAmount, feeRate, fixedFee decimal.Decimal, customerFeeEnabled bool) (paymentAmount, feeAmount decimal.Decimal, feePolicy string) {
+	baseAmount = baseAmount.Round(2)
+	feeAmount = fixedFee.Round(2)
+	if feeRate.GreaterThan(decimal.Zero) {
+		feeAmount = feeAmount.Add(baseAmount.Mul(feeRate).Div(decimal.NewFromInt(100))).Round(2)
+	}
+	if feeAmount.IsZero() {
+		return baseAmount, feeAmount, constants.PaymentFeePolicyNone
+	}
+	if customerFeeEnabled {
+		return baseAmount.Add(feeAmount).Round(2), feeAmount, constants.PaymentFeePolicyCustomerSurcharge
+	}
+	return baseAmount, feeAmount, constants.PaymentFeePolicyMerchantAbsorbed
+}
+
 // paymentCoveredOrderAmount returns the net order-currency value of this payment.
 // The creation fee policy determines whether recorded order-currency fees were surcharged.
 // Cross-currency payments require the original creation snapshot and its exact
@@ -191,30 +207,5 @@ func buildOrderSubject(order *orderdomain.Order) string {
 	if order == nil {
 		return ""
 	}
-	if len(order.Items) > 0 {
-		title := pickOrderItemTitle(order.Items[0].TitleJSON)
-		if title != "" {
-			return title
-		}
-	}
-	return order.OrderNo
-}
-
-func pickOrderItemTitle(title jsonmap.JSON) string {
-	if title == nil {
-		return ""
-	}
-	for _, key := range constants.SupportedLocales {
-		if val, ok := title[key]; ok {
-			if str, ok := val.(string); ok && strings.TrimSpace(str) != "" {
-				return strings.TrimSpace(str)
-			}
-		}
-	}
-	for _, val := range title {
-		if str, ok := val.(string); ok && strings.TrimSpace(str) != "" {
-			return strings.TrimSpace(str)
-		}
-	}
-	return ""
+	return strings.TrimSpace(order.OrderNo)
 }

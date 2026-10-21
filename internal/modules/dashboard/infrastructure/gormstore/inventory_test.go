@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	cardsecretdomain "github.com/dujiao-next/internal/modules/cardsecret/domain"
+	mappingdomain "github.com/dujiao-next/internal/modules/catalog/mapping/domain"
 	productdomain "github.com/dujiao-next/internal/modules/catalog/product/domain"
 
 	"github.com/dujiao-next/internal/constants"
@@ -97,6 +98,86 @@ func TestGetStockStatsUsesActiveManualSKUs(t *testing.T) {
 	}
 	if stats.OutOfStockProducts != 1 {
 		t.Fatalf("out of stock products want 1 got %d", stats.OutOfStockProducts)
+	}
+}
+
+func TestGetInventoryAlertItemsIncludesUpstreamProducts(t *testing.T) {
+	repo, db := setupDashboardRepositoryTest(t)
+
+	// Migrate mapping tables for test
+	if err := db.AutoMigrate(&mappingdomain.Mapping{}, &mappingdomain.SKUMapping{}); err != nil {
+		t.Fatalf("migrate mapping tables failed: %v", err)
+	}
+
+	category := createDashboardCategory(t, db, "dashboard-upstream-alert")
+
+	// Create upstream product with low stock
+	upstreamProduct := &productdomain.Product{
+		CategoryID:      category.ID,
+		Slug:            "upstream-low-stock",
+		TitleJSON:       jsonmap.JSON{"zh-CN": "对接低库存商品"},
+		PriceAmount:     money.FromDecimal(decimal.NewFromInt(99)),
+		PurchaseType:    constants.ProductPurchaseMember,
+		FulfillmentType: constants.FulfillmentTypeUpstream,
+		IsMapped:        true,
+		IsActive:        true,
+	}
+	if err := db.Create(upstreamProduct).Error; err != nil {
+		t.Fatalf("create upstream product failed: %v", err)
+	}
+
+	upstreamSKU := &productdomain.ProductSKU{
+		ProductID:   upstreamProduct.ID,
+		SKUCode:     "UP-SKU",
+		PriceAmount: money.FromDecimal(decimal.NewFromInt(99)),
+		IsActive:    true,
+		SortOrder:   0,
+	}
+	if err := db.Create(upstreamSKU).Error; err != nil {
+		t.Fatalf("create upstream sku failed: %v", err)
+	}
+
+	// Create product mapping
+	productMapping := &mappingdomain.Mapping{
+		ConnectionID:   1,
+		LocalProductID: upstreamProduct.ID,
+	}
+	if err := db.Create(productMapping).Error; err != nil {
+		t.Fatalf("create product mapping failed: %v", err)
+	}
+
+	// Create SKU mapping with low stock
+	skuMapping := &mappingdomain.SKUMapping{
+		ProductMappingID: productMapping.ID,
+		LocalSKUID:       upstreamSKU.ID,
+		UpstreamSKUID:    999,
+		UpstreamStock:    2,
+		UpstreamIsActive: true,
+	}
+	if err := db.Create(skuMapping).Error; err != nil {
+		t.Fatalf("create sku mapping failed: %v", err)
+	}
+
+	rows, err := repo.GetInventoryAlertItems(5)
+	if err != nil {
+		t.Fatalf("get inventory alert items failed: %v", err)
+	}
+
+	// Should include the upstream product
+	if len(rows) != 1 {
+		t.Fatalf("inventory alert rows want 1 got %d: %+v", len(rows), rows)
+	}
+	if rows[0].ProductID != upstreamProduct.ID {
+		t.Fatalf("alert should be for upstream product %d, got %d", upstreamProduct.ID, rows[0].ProductID)
+	}
+	if rows[0].FulfillmentType != constants.FulfillmentTypeUpstream {
+		t.Fatalf("fulfillment type want %s got %s", constants.FulfillmentTypeUpstream, rows[0].FulfillmentType)
+	}
+	if rows[0].AvailableStock != 2 {
+		t.Fatalf("available stock want 2 got %d", rows[0].AvailableStock)
+	}
+	if rows[0].AlertType != constants.NotificationAlertTypeLowStockProducts {
+		t.Fatalf("alert type want %s got %s", constants.NotificationAlertTypeLowStockProducts, rows[0].AlertType)
 	}
 }
 

@@ -48,7 +48,7 @@ func TestWalletOwnsCompleteVerticalSlice(t *testing.T) {
 		"CreditInTransaction",
 	})
 	assertFileDeclaresFunctions(t, filepath.Join(applicationRoot, "order_balance.go"), []string{
-		"ApplyOrderBalance", "ReleaseOrderBalance", "orderAllocationReference",
+		"ApplyOrderBalance", "ReleaseOrderBalance",
 	})
 	assertFileDeclaresFunctions(t, filepath.Join(applicationRoot, "recharge.go"), []string{
 		"ApplyRechargePayment",

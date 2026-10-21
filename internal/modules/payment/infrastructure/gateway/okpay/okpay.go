@@ -3,7 +3,9 @@ package okpay
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +26,7 @@ import (
 const (
 	defaultGatewayURL = "https://api.okaypay.me/shop"
 	payLinkPath       = "/payLink"
+	nonceByteCount    = 16
 )
 
 var (
@@ -230,14 +234,18 @@ func CreatePayment(ctx context.Context, cfg *Config, input CreateInput) (*Create
 }
 
 func SignPayload(payload map[string]string, merchantID string, merchantToken string) map[string]string {
-	values := make([]OrderedPair, 0, len(payload)+1)
+	values := make([]OrderedPair, 0, len(payload)+3)
 	for key, value := range payload {
 		values = append(values, OrderedPair{
 			Key:   strings.TrimSpace(key),
 			Value: strings.TrimSpace(value),
 		})
 	}
-	values = append(values, OrderedPair{Key: "id", Value: strings.TrimSpace(merchantID)})
+	values = append(values,
+		OrderedPair{Key: "id", Value: strings.TrimSpace(merchantID)},
+		OrderedPair{Key: "timestamp", Value: strconv.FormatInt(time.Now().Unix(), 10)},
+		OrderedPair{Key: "nonce", Value: generateNonce()},
+	)
 	sort.Slice(values, func(i, j int) bool {
 		return values[i].Key < values[j].Key
 	})
@@ -254,20 +262,20 @@ func SignPayload(payload map[string]string, merchantID string, merchantToken str
 	return result
 }
 
+func generateNonce() string {
+	buf := make([]byte, nonceByteCount)
+	if _, err := rand.Read(buf); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(buf)
+}
+
 func ParseCallback(body []byte) (*CallbackData, error) {
-	var (
-		pairs []OrderedPair
-		err   error
-	)
 	trimmed := strings.TrimSpace(string(body))
-	if trimmed == "" {
+	if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
 		return nil, ErrResponseInvalid
 	}
-	if strings.HasPrefix(trimmed, "{") {
-		pairs, err = parseOrderedJSON(body)
-	} else {
-		pairs = parseOrderedForm(body)
-	}
+	pairs, err := parseOrderedJSON(body)
 	if err != nil {
 		return nil, err
 	}
@@ -285,13 +293,13 @@ func ParseCallback(body []byte) (*CallbackData, error) {
 		Code:          strings.TrimSpace(raw["code"]),
 		RequestStatus: strings.TrimSpace(raw["status"]),
 		Sign:          strings.TrimSpace(raw["sign"]),
-		OrderID:       strings.TrimSpace(raw["data[order_id]"]),
-		UniqueID:      strings.TrimSpace(raw["data[unique_id]"]),
-		PayUserID:     strings.TrimSpace(raw["data[pay_user_id]"]),
-		Amount:        strings.TrimSpace(raw["data[amount]"]),
-		Coin:          strings.ToUpper(strings.TrimSpace(raw["data[coin]"])),
-		PaymentStatus: strings.TrimSpace(raw["data[status]"]),
-		Type:          strings.TrimSpace(raw["data[type]"]),
+		OrderID:       strings.TrimSpace(raw["data.order_id"]),
+		UniqueID:      strings.TrimSpace(raw["data.unique_id"]),
+		PayUserID:     strings.TrimSpace(raw["data.pay_user_id"]),
+		Amount:        strings.TrimSpace(raw["data.amount"]),
+		Coin:          strings.ToUpper(strings.TrimSpace(raw["data.coin"])),
+		PaymentStatus: strings.TrimSpace(raw["data.status"]),
+		Type:          strings.TrimSpace(raw["data.type"]),
 	}
 	if callback.Sign == "" {
 		return nil, ErrResponseInvalid
@@ -303,28 +311,21 @@ func VerifyCallback(cfg *Config, data *CallbackData) error {
 	if cfg == nil || data == nil {
 		return ErrConfigInvalid
 	}
-	if strings.TrimSpace(cfg.MerchantID) != "" && data.MerchantID != "" && data.MerchantID != strings.TrimSpace(cfg.MerchantID) {
+	if strings.TrimSpace(cfg.MerchantToken) == "" {
+		return ErrConfigInvalid
+	}
+	if strings.TrimSpace(cfg.MerchantID) != "" && data.MerchantID != strings.TrimSpace(cfg.MerchantID) {
 		return ErrSignatureInvalid
 	}
 	if data.Sign == "" {
 		return ErrSignatureInvalid
 	}
-	expected := buildSignature(stripSignPairs(data.RawPairs), cfg.MerchantToken)
-	if strings.EqualFold(expected, data.Sign) {
-		return nil
-	}
-	sortedPairs := make([]OrderedPair, 0, len(data.Raw))
-	for key, value := range data.Raw {
-		if strings.EqualFold(strings.TrimSpace(key), "sign") {
-			continue
-		}
-		sortedPairs = append(sortedPairs, OrderedPair{Key: key, Value: value})
-	}
-	sort.SliceStable(sortedPairs, func(i, j int) bool {
-		return sortedPairs[i].Key < sortedPairs[j].Key
+	pairs := stripSignPairs(data.RawPairs)
+	sort.SliceStable(pairs, func(i, j int) bool {
+		return pairs[i].Key < pairs[j].Key
 	})
-	expected = buildSignature(sortedPairs, cfg.MerchantToken)
-	if !strings.EqualFold(expected, data.Sign) {
+	expected := buildSignature(pairs, cfg.MerchantToken)
+	if !hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(data.Sign))) {
 		return ErrSignatureInvalid
 	}
 	return nil
@@ -402,38 +403,6 @@ func postForm(ctx context.Context, endpoint string, payload map[string]string) (
 	return body, nil
 }
 
-func parseOrderedForm(body []byte) []OrderedPair {
-	raw := strings.TrimSpace(string(body))
-	if raw == "" {
-		return nil
-	}
-	items := strings.Split(raw, "&")
-	result := make([]OrderedPair, 0, len(items))
-	for _, item := range items {
-		if item == "" {
-			continue
-		}
-		parts := strings.SplitN(item, "=", 2)
-		key, err := url.QueryUnescape(parts[0])
-		if err != nil {
-			key = parts[0]
-		}
-		value := ""
-		if len(parts) == 2 {
-			if decoded, decodeErr := url.QueryUnescape(parts[1]); decodeErr == nil {
-				value = decoded
-			} else {
-				value = parts[1]
-			}
-		}
-		result = append(result, OrderedPair{
-			Key:   strings.TrimSpace(key),
-			Value: strings.TrimSpace(value),
-		})
-	}
-	return result
-}
-
 func parseOrderedJSON(body []byte) ([]OrderedPair, error) {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -472,7 +441,7 @@ func decodeJSONObject(decoder *json.Decoder, prefix string) ([]OrderedPair, erro
 
 		fullKey := key
 		if prefix != "" {
-			fullKey = prefix + "[" + key + "]"
+			fullKey = prefix + "." + key
 		}
 
 		switch token := nextToken.(type) {
@@ -586,6 +555,9 @@ func stripSignPairs(pairs []OrderedPair) []OrderedPair {
 	return result
 }
 
+// buildSignature 按官方 HMAC-SHA256 新协议构造签名原文并计算签名。
+// base 的字段值已在 ParseCallback / SignPayload 阶段以字符串形式保留（数字/布尔原样转字符串，
+// 不重新格式化），此处只需按键名 ASCII 升序拼接，值不做任何 URL 编码。
 func buildSignature(pairs []OrderedPair, merchantToken string) string {
 	filtered := make([]string, 0, len(pairs))
 	for _, item := range pairs {
@@ -596,9 +568,10 @@ func buildSignature(pairs []OrderedPair, merchantToken string) string {
 		}
 		filtered = append(filtered, key+"="+value)
 	}
-	query := strings.Join(filtered, "&")
-	sum := md5.Sum([]byte(query + "&token=" + strings.TrimSpace(merchantToken)))
-	return strings.ToUpper(hex.EncodeToString(sum[:]))
+	base := strings.Join(filtered, "&")
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(merchantToken)))
+	mac.Write([]byte(base))
+	return strings.ToUpper(hex.EncodeToString(mac.Sum(nil)))
 }
 
 func isSupportedCoin(coin string) bool {

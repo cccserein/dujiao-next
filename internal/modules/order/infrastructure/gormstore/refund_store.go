@@ -3,12 +3,15 @@ package gormstore
 import (
 	"errors"
 	"strings"
+	"time"
 
 	ordercontract "github.com/dujiao-next/internal/modules/order/contract"
 	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
 	"github.com/dujiao-next/internal/persistence/gormutil"
+	"github.com/dujiao-next/internal/shared/money"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Create 创建退款记录
@@ -32,6 +35,32 @@ func (r *Store) GetRefundRecordByID(id uint) (*orderdomain.OrderRefundRecord, er
 		return nil, err
 	}
 	return &record, nil
+}
+
+func (r *Store) GetRefundRecordByIDForUpdate(id uint) (*orderdomain.OrderRefundRecord, error) {
+	if id == 0 {
+		return nil, nil
+	}
+	var record orderdomain.OrderRefundRecord
+	if err := r.db.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("deleted_at IS NULL").
+		First(&record, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &record, nil
+}
+
+func (r *Store) UpdateRefundRecordPaymentFee(id uint, refunded bool, amount money.Amount, updatedAt time.Time) error {
+	return r.db.Model(&orderdomain.OrderRefundRecord{}).
+		Where("id = ? AND deleted_at IS NULL", id).
+		Updates(map[string]interface{}{
+			"payment_fee_refunded":        refunded,
+			"payment_fee_refunded_amount": amount,
+			"updated_at":                  updatedAt,
+		}).Error
 }
 
 // ListByOrderIDs 按订单ID列表获取退款记录（按创建时间倒序）

@@ -57,7 +57,7 @@ func (s *Service) SendTest(ctx context.Context, input contract.TestSendInput) er
 	}
 
 	switch channel {
-	case "email":
+	case constants.NotificationChannelEmail:
 		sendErr := contract.ErrSendFailed
 		if s.emailService != nil {
 			sendErr = s.emailService.SendCustomEmail(target, title, body)
@@ -74,12 +74,39 @@ func (s *Service) SendTest(ctx context.Context, input contract.TestSendInput) er
 			sendErr:   sendErr,
 		})
 		return sendErr
-	case "telegram":
+	case constants.NotificationChannelTelegram:
 		sendErr := contract.ErrSendFailed
 		gatewayCtx, cancel := detachOutboundRequestContext(ctx)
 		defer cancel()
 		if s.telegramSender != nil {
-			sendErr = s.telegramSender.SendMessage(gatewayCtx, target, format.ComposeTelegramMessage(title, body))
+			sendErr = s.telegramSender.SendMessage(gatewayCtx, target, format.ComposePlainTextMessage(title, body))
+		}
+		s.recordSendAttempt(notificationSendAttempt{
+			eventType: scene,
+			channel:   channel,
+			recipient: target,
+			locale:    locale,
+			title:     title,
+			body:      body,
+			variables: variables,
+			isTest:    true,
+			sendErr:   sendErr,
+		})
+		return sendErr
+	case constants.NotificationChannelFeishu:
+		sendErr := contract.ErrSendFailed
+		gatewayCtx, cancel := detachOutboundRequestContext(ctx)
+		defer cancel()
+		if s.feishuSender != nil {
+			feishu := setting.Channels.Feishu
+			sendErr = s.feishuSender.SendMessage(
+				gatewayCtx,
+				feishu.AppID,
+				feishu.AppSecret,
+				feishu.ReceiveIDType,
+				target,
+				format.ComposePlainTextMessage(title, body),
+			)
 		}
 		s.recordSendAttempt(notificationSendAttempt{
 			eventType: scene,
@@ -134,7 +161,7 @@ func (s *Service) dispatchSingleEvent(ctx context.Context, setting settingsmessa
 				eventType: payload.EventType,
 				bizType:   payload.BizType,
 				bizID:     payload.BizID,
-				channel:   "email",
+				channel:   constants.NotificationChannelEmail,
 				recipient: recipient,
 				locale:    locale,
 				title:     title,
@@ -157,7 +184,7 @@ func (s *Service) dispatchSingleEvent(ctx context.Context, setting settingsmessa
 		}
 	}
 	if setting.Channels.Telegram.Enabled && len(setting.Channels.Telegram.Recipients) > 0 {
-		message := format.ComposeTelegramMessage(title, body)
+		message := format.ComposePlainTextMessage(title, body)
 		for _, recipient := range setting.Channels.Telegram.Recipients {
 			var sendErr error
 			if s.telegramSender == nil {
@@ -169,7 +196,7 @@ func (s *Service) dispatchSingleEvent(ctx context.Context, setting settingsmessa
 				eventType: payload.EventType,
 				bizType:   payload.BizType,
 				bizID:     payload.BizID,
-				channel:   "telegram",
+				channel:   constants.NotificationChannelTelegram,
 				recipient: recipient,
 				locale:    locale,
 				title:     title,
@@ -179,6 +206,48 @@ func (s *Service) dispatchSingleEvent(ctx context.Context, setting settingsmessa
 			})
 			if sendErr != nil {
 				logger.Warnw("notification_telegram_send_failed",
+					"event_type", payload.EventType,
+					"biz_type", payload.BizType,
+					"biz_id", payload.BizID,
+					"recipient", recipient,
+					"error", sendErr,
+				)
+				if firstErr == nil {
+					firstErr = sendErr
+				}
+			}
+		}
+	}
+	if setting.Channels.Feishu.Enabled && len(setting.Channels.Feishu.Recipients) > 0 {
+		message := format.ComposePlainTextMessage(title, body)
+		for _, recipient := range setting.Channels.Feishu.Recipients {
+			var sendErr error
+			if s.feishuSender == nil {
+				sendErr = contract.ErrSendFailed
+			} else {
+				sendErr = s.feishuSender.SendMessage(
+					ctx,
+					setting.Channels.Feishu.AppID,
+					setting.Channels.Feishu.AppSecret,
+					setting.Channels.Feishu.ReceiveIDType,
+					recipient,
+					message,
+				)
+			}
+			s.recordSendAttempt(notificationSendAttempt{
+				eventType: payload.EventType,
+				bizType:   payload.BizType,
+				bizID:     payload.BizID,
+				channel:   constants.NotificationChannelFeishu,
+				recipient: recipient,
+				locale:    locale,
+				title:     title,
+				body:      body,
+				variables: variables,
+				sendErr:   sendErr,
+			})
+			if sendErr != nil {
+				logger.Warnw("notification_feishu_send_failed",
 					"event_type", payload.EventType,
 					"biz_type", payload.BizType,
 					"biz_id", payload.BizID,

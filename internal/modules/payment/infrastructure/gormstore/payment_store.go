@@ -112,9 +112,10 @@ func (r *Store) GetLatestPendingByOrder(orderID uint, now time.Time) (*paymentdo
 	result := r.db.
 		Select("payments.*, payment_channels.name AS channel_name").
 		Joins("LEFT JOIN payment_channels ON payment_channels.id = payments.channel_id AND payment_channels.deleted_at IS NULL").
-		Where("payments.deleted_at IS NULL AND payments.order_id = ? AND payments.status IN ? AND (payments.expired_at IS NULL OR payments.expired_at > ?) AND ((payments.pay_url IS NOT NULL AND payments.pay_url <> '') OR (payments.qr_code IS NOT NULL AND payments.qr_code <> ''))",
+		Where("payments.deleted_at IS NULL AND payments.order_id = ? AND payments.status IN ? AND payments.superseded_at IS NULL AND payments.fee_policy IN ? AND (payments.expired_at IS NULL OR payments.expired_at > ?) AND ((payments.pay_url IS NOT NULL AND payments.pay_url <> '') OR (payments.qr_code IS NOT NULL AND payments.qr_code <> ''))",
 			orderID,
 			[]string{constants.PaymentStatusInitiated, constants.PaymentStatusPending},
+			[]string{constants.PaymentFeePolicyNone, constants.PaymentFeePolicyMerchantAbsorbed, constants.PaymentFeePolicyCustomerSurcharge},
 			now,
 		).Order("payments.id desc").Limit(1).Find(&payment)
 	if result.Error != nil {
@@ -129,7 +130,7 @@ func (r *Store) GetLatestPendingByOrder(orderID uint, now time.Time) (*paymentdo
 // GetLatestPendingByOrderChannel 获取订单+渠道最新待支付记录
 func (r *Store) GetLatestPendingByOrderChannel(orderID uint, channelID uint, now time.Time) (*paymentdomain.Payment, error) {
 	var payment paymentdomain.Payment
-	result := r.db.Where("deleted_at IS NULL AND order_id = ? AND channel_id = ? AND status IN ? AND (expired_at IS NULL OR expired_at > ?) AND ((pay_url IS NOT NULL AND pay_url <> '') OR (qr_code IS NOT NULL AND qr_code <> ''))",
+	result := r.db.Where("deleted_at IS NULL AND order_id = ? AND channel_id = ? AND status IN ? AND superseded_at IS NULL AND (expired_at IS NULL OR expired_at > ?) AND ((pay_url IS NOT NULL AND pay_url <> '') OR (qr_code IS NOT NULL AND qr_code <> ''))",
 		orderID,
 		channelID,
 		[]string{constants.PaymentStatusInitiated, constants.PaymentStatusPending},
@@ -142,6 +143,23 @@ func (r *Store) GetLatestPendingByOrderChannel(orderID uint, channelID uint, now
 		return nil, nil
 	}
 	return &payment, nil
+}
+
+// SupersedePendingByOrderID 将同一订单的旧支付链接替换为指定的新支付记录。
+func (r *Store) SupersedePendingByOrderID(orderID, replacementPaymentID uint, supersededAt time.Time) (int64, error) {
+	if orderID == 0 || replacementPaymentID == 0 {
+		return 0, nil
+	}
+	result := r.db.Model(&paymentdomain.Payment{}).
+		Where("deleted_at IS NULL AND order_id = ? AND id <> ? AND status IN ?", orderID, replacementPaymentID, []string{constants.PaymentStatusInitiated, constants.PaymentStatusPending}).
+		Updates(map[string]interface{}{
+			"status":                   constants.PaymentStatusExpired,
+			"expired_at":               supersededAt,
+			"superseded_at":            supersededAt,
+			"superseded_by_payment_id": replacementPaymentID,
+			"updated_at":               supersededAt,
+		})
+	return result.RowsAffected, result.Error
 }
 
 // ExpirePendingByOrderIDs 将指定订单的未完成支付记录标记为过期。
@@ -202,6 +220,8 @@ func (r *Store) ListAdmin(filter paymentcontract.ListFilter) ([]paymentdomain.Pa
 			"payments.amount",
 			"payments.fee_rate",
 			"payments.fee_amount",
+			"payments.fee_policy",
+			"payments.exception_code",
 			"payments.currency",
 			"payments.status",
 			"payments.provider_ref",
@@ -209,6 +229,8 @@ func (r *Store) ListAdmin(filter paymentcontract.ListFilter) ([]paymentdomain.Pa
 			"payments.updated_at",
 			"payments.paid_at",
 			"payments.expired_at",
+			"payments.superseded_at",
+			"payments.superseded_by_payment_id",
 			"payments.callback_at",
 		)
 	}

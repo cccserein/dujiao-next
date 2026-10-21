@@ -15,6 +15,8 @@ func (r *Store) GetTopChannels(startAt, endAt time.Time, limit int) ([]dashboard
 		limit = 5
 	}
 	rows := make([]dashboard.ChannelRankingRow, 0)
+	timeWhere, timeArgs := timeRangeQuery(r.db, "payments.created_at", startAt, endAt)
+	args := append(timeArgs, constants.PaymentProviderWallet)
 	if err := r.db.Model(&paymentdomain.Payment{}).
 		Select(`
 			payments.channel_id as channel_id,
@@ -27,7 +29,7 @@ func (r *Store) GetTopChannels(startAt, endAt time.Time, limit int) ([]dashboard
 		`).
 		Joins("LEFT JOIN payment_channels ON payment_channels.id = payments.channel_id").
 		Where("payments.deleted_at IS NULL").
-		Where("payments.created_at >= ? AND payments.created_at < ? AND payments.provider_type <> ?", startAt, endAt, constants.PaymentProviderWallet).
+		Where(timeWhere+" AND payments.provider_type <> ?", args...).
 		Group("payments.channel_id, payment_channels.name, payments.provider_type, payments.channel_type").
 		Order("success_amount DESC, success_count DESC").
 		Limit(limit).

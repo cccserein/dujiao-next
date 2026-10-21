@@ -3,12 +3,14 @@ package gormstore
 import (
 	"errors"
 	"fmt"
+	"github.com/dujiao-next/internal/persistence/gormutil"
 	"time"
 
 	couponcontract "github.com/dujiao-next/internal/modules/coupon/contract"
 	coupondomain "github.com/dujiao-next/internal/modules/coupon/domain"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Store GORM 优惠券存储。
@@ -32,6 +34,20 @@ func (r *Store) WithTx(tx *gorm.DB) couponcontract.Repository {
 func (r *Store) GetByID(id uint) (*coupondomain.Coupon, error) {
 	var coupon coupondomain.Coupon
 	if err := r.db.Where("deleted_at IS NULL").First(&coupon, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &coupon, nil
+}
+
+// GetByIDForUpdate 在当前事务中锁定优惠券，用于原子校验并占用使用次数。
+func (r *Store) GetByIDForUpdate(id uint) (*coupondomain.Coupon, error) {
+	var coupon coupondomain.Coupon
+	if err := r.db.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("deleted_at IS NULL").
+		First(&coupon, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -115,7 +131,7 @@ func (r *Store) List(filter couponcontract.ListFilter) ([]coupondomain.Coupon, i
 		return nil, 0, err
 	}
 
-	query = applyPagination(query, filter.Page, filter.PageSize)
+	query = gormutil.ApplyPagination(query, filter.Page, filter.PageSize)
 
 	if err := query.Order("id desc").Find(&coupons).Error; err != nil {
 		return nil, 0, err

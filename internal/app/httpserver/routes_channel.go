@@ -11,6 +11,7 @@ import (
 	wallettransport "github.com/dujiao-next/internal/modules/wallet/transport/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 func registerChannelRoutes(
@@ -22,9 +23,12 @@ func registerChannelRoutes(
 	channelAffiliateHandler *affiliatetransport.ChannelHandler,
 	channelTelegramBotHandler *telegramtransport.ChannelBotHandler,
 	channelWalletHandler *wallettransport.ChannelHandler,
+	redisClient *redis.Client,
+	channelAPIRule middleware.RateLimitRule,
 ) {
 	// 渠道 API（Telegram Bot 等外部服务调用）
 	channelAPI := apiV1.Group("/channel")
+	channelAPI.Use(middleware.RateLimitMiddleware(redisClient, channelAPIRule, middleware.KeyByIPAndHeader("Dujiao-Next-Channel-Key")))
 	channelAPI.Use(middleware.ChannelAPIAuthMiddleware(c))
 	{
 		telegramtransport.RegisterChannelBotRoutes(channelAPI, channelTelegramBotHandler)

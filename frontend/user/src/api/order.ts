@@ -8,7 +8,7 @@ type GuestAuthInput = {
 }
 
 function encodeGuestAuthorization(email: string, orderPassword: string): string {
-    const bytes = new TextEncoder().encode(`${email.trim()}\n${orderPassword.trim()}`)
+    const bytes = new TextEncoder().encode(`${email.trim().toLowerCase()}\n${orderPassword.trim()}`)
     let binary = ''
     for (const byte of bytes) {
         binary += String.fromCharCode(byte)

@@ -3,8 +3,10 @@ package wechatpay
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -22,10 +24,7 @@ import (
 
 	"github.com/shopspring/decimal"
 	"github.com/wechatpay-apiv3/wechatpay-go/core"
-	"github.com/wechatpay-apiv3/wechatpay-go/core/auth/verifiers"
-	"github.com/wechatpay-apiv3/wechatpay-go/core/downloader"
 	"github.com/wechatpay-apiv3/wechatpay-go/core/notify"
-	"github.com/wechatpay-apiv3/wechatpay-go/core/option"
 	"github.com/wechatpay-apiv3/wechatpay-go/services/payments"
 )
 
@@ -37,8 +36,9 @@ var (
 )
 
 const (
-	defaultBaseURL = "https://api.mch.weixin.qq.com"
-	defaultTimeout = 15 * time.Second
+	defaultBaseURL   = "https://api.mch.weixin.qq.com"
+	defaultTimeout   = 15 * time.Second
+	securityEchoPath = "/v3/security/echo"
 
 	wechatH5TypeWAP     = "WAP"
 	wechatH5TypeIOS     = "IOS"
@@ -56,17 +56,20 @@ const (
 // Config 微信官方支付配置。
 type Config struct {
 	common.ExchangeRateConfig
-	AppID              string `json:"appid"`
-	MerchantID         string `json:"mchid"`
-	MerchantSerialNo   string `json:"merchant_serial_no"`
-	MerchantPrivateKey string `json:"merchant_private_key"`
-	APIV3Key           string `json:"api_v3_key"`
-	NotifyURL          string `json:"notify_url"`
-	H5RedirectURL      string `json:"h5_redirect_url"`
-	H5Type             string `json:"h5_type"`
-	H5WapURL           string `json:"h5_wap_url"`
-	H5WapName          string `json:"h5_wap_name"`
-	BaseURL            string `json:"base_url"`
+	AppID                string `json:"appid"`
+	MerchantID           string `json:"mchid"`
+	MerchantSerialNo     string `json:"merchant_serial_no"`
+	MerchantPrivateKey   string `json:"merchant_private_key"`
+	APIV3Key             string `json:"api_v3_key"`
+	VerificationMode     string `json:"verification_mode"`
+	WechatPayPublicKeyID string `json:"wechatpay_public_key_id"`
+	WechatPayPublicKey   string `json:"wechatpay_public_key"`
+	NotifyURL            string `json:"notify_url"`
+	H5RedirectURL        string `json:"h5_redirect_url"`
+	H5Type               string `json:"h5_type"`
+	H5WapURL             string `json:"h5_wap_url"`
+	H5WapName            string `json:"h5_wap_name"`
+	BaseURL              string `json:"base_url"`
 }
 
 // CreateInput 创建微信支付单输入。
@@ -110,6 +113,14 @@ type WebhookResult struct {
 	Attach        string
 	PaidAt        *time.Time
 	Raw           map[string]interface{}
+}
+
+// SecurityEchoResult 微信支付公钥非交易诊断结果。
+type SecurityEchoResult struct {
+	ResponseSerial           string
+	RequestSignatureAccepted bool
+	ResponseSignatureValid   bool
+	EchoMessageMatched       bool
 }
 
 // ParseConfig 解析配置。
@@ -267,6 +278,76 @@ func QueryOrderByOutTradeNo(ctx context.Context, cfg *Config, orderNo string) (*
 	return parseQueryResult(raw, orderNo)
 }
 
+// TestWechatPayPublicKey 调用微信支付官方 /v3/security/echo 接口，强制使用
+// Wechatpay-Serial: PUB_KEY_ID_... 获取应答，并仅使用配置的微信支付公钥验签。
+// 请求不携带 notify_url，不会触发回调或创建真实交易。
+func TestWechatPayPublicKey(ctx context.Context, cfg *Config) (*SecurityEchoResult, error) {
+	if err := validateBaseConfig(cfg); err != nil {
+		return nil, err
+	}
+	if cfg.VerificationMode != verificationModeWechatPayPublicKey && cfg.VerificationMode != verificationModeCombined {
+		return nil, fmt.Errorf("%w: public key or combined verification mode is required", ErrConfigInvalid)
+	}
+	if !strings.HasPrefix(cfg.WechatPayPublicKeyID, "PUB_KEY_ID_") {
+		return nil, fmt.Errorf("%w: wechatpay_public_key_id must start with PUB_KEY_ID_", ErrConfigInvalid)
+	}
+
+	ctx, cancel := withDefaultTimeout(ctx)
+	defer cancel()
+
+	privateKey, err := parsePrivateKey(cfg.MerchantPrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	verifier, err := createWechatPayPublicKeyVerifier(cfg)
+	if err != nil {
+		return nil, err
+	}
+	client, err := createAPIClientWithVerifier(
+		ctx,
+		cfg,
+		privateKey,
+		verifier,
+		withAcceptJSONHTTPClient(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	echoMessage, err := newSecurityEchoMessage()
+	if err != nil {
+		return nil, fmt.Errorf("%w: generate echo message failed", ErrRequestFailed)
+	}
+	requestURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/") + securityEchoPath
+	result, err := client.Post(ctx, requestURL, map[string]interface{}{
+		"echo_message": echoMessage,
+	})
+	if err != nil {
+		return nil, wrapRequestError(err)
+	}
+	responseSerial := ""
+	if result != nil && result.Response != nil {
+		responseSerial = strings.TrimSpace(result.Response.Header.Get("Wechatpay-Serial"))
+	}
+	raw, err := parseAPIResult(result)
+	if err != nil {
+		return nil, err
+	}
+	if responseSerial != cfg.WechatPayPublicKeyID {
+		return nil, fmt.Errorf("%w: unexpected response serial", ErrSignatureInvalid)
+	}
+	if readString(raw, "echo_message") != echoMessage {
+		return nil, fmt.Errorf("%w: echo_message mismatch", ErrResponseInvalid)
+	}
+
+	return &SecurityEchoResult{
+		ResponseSerial:           responseSerial,
+		RequestSignatureAccepted: true,
+		ResponseSignatureValid:   true,
+		EchoMessageMatched:       true,
+	}, nil
+}
+
 // VerifyAndDecodeWebhook 验签并解密微信回调。
 func VerifyAndDecodeWebhook(ctx context.Context, cfg *Config, headers map[string]string, body []byte) (*WebhookResult, error) {
 	if err := validateBaseConfig(cfg); err != nil {
@@ -283,14 +364,10 @@ func VerifyAndDecodeWebhook(ctx context.Context, cfg *Config, headers map[string
 		return nil, err
 	}
 
-	mgr := downloader.MgrInstance()
-	if !mgr.HasDownloader(ctx, cfg.MerchantID) {
-		if err := mgr.RegisterDownloaderWithPrivateKey(ctx, privateKey, cfg.MerchantSerialNo, cfg.MerchantID, cfg.APIV3Key); err != nil {
-			return nil, fmt.Errorf("%w: register certificate downloader failed", ErrRequestFailed)
-		}
+	verifier, err := createWechatPayVerifier(ctx, cfg, privateKey)
+	if err != nil {
+		return nil, err
 	}
-
-	verifier := verifiers.NewSHA256WithRSAVerifier(mgr.GetCertificateVisitor(cfg.MerchantID))
 	handler, err := notify.NewRSANotifyHandler(cfg.APIV3Key, verifier)
 	if err != nil {
 		return nil, fmt.Errorf("%w: init notify handler failed", ErrConfigInvalid)
@@ -403,22 +480,10 @@ func validateBaseConfig(cfg *Config) error {
 	if err := validatePrivateKey(cfg.MerchantPrivateKey); err != nil {
 		return err
 	}
+	if err := validateVerificationConfig(cfg); err != nil {
+		return err
+	}
 	return nil
-}
-
-func createAPIClient(ctx context.Context, cfg *Config) (*core.Client, error) {
-	privateKey, err := parsePrivateKey(cfg.MerchantPrivateKey)
-	if err != nil {
-		return nil, err
-	}
-	client, err := core.NewClient(ctx,
-		option.WithMerchantCredential(cfg.MerchantID, cfg.MerchantSerialNo, privateKey),
-		option.WithoutValidator(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("%w: init client failed", ErrConfigInvalid)
-	}
-	return client, nil
 }
 
 func doPostJSON(ctx context.Context, client *core.Client, requestURL string, payload map[string]interface{}) (map[string]interface{}, error) {
@@ -438,6 +503,9 @@ func doGetJSON(ctx context.Context, client *core.Client, requestURL string) (map
 }
 
 func wrapRequestError(err error) error {
+	if errors.Is(err, ErrSignatureInvalid) {
+		return err
+	}
 	var apiErr *core.APIError
 	if errors.As(err, &apiErr) {
 		return fmt.Errorf("%w: %s", ErrResponseInvalid, strings.TrimSpace(apiErr.Message))
@@ -679,6 +747,14 @@ func buildDescription(description string, orderNo string) string {
 	return "订单 " + orderNo
 }
 
+func newSecurityEchoMessage() (string, error) {
+	randomBytes := make([]byte, 16)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+	return "dujiao-next-" + hex.EncodeToString(randomBytes), nil
+}
+
 func validatePrivateKey(raw string) error {
 	if _, err := parsePrivateKey(raw); err != nil {
 		return err
@@ -727,6 +803,7 @@ func (c *Config) Normalize() {
 	c.MerchantSerialNo = strings.TrimSpace(c.MerchantSerialNo)
 	c.MerchantPrivateKey = strings.TrimSpace(c.MerchantPrivateKey)
 	c.APIV3Key = strings.TrimSpace(c.APIV3Key)
+	c.normalizeVerificationConfig()
 	c.NotifyURL = strings.TrimSpace(c.NotifyURL)
 	c.H5RedirectURL = strings.TrimSpace(c.H5RedirectURL)
 	c.H5Type = strings.ToUpper(strings.TrimSpace(c.H5Type))

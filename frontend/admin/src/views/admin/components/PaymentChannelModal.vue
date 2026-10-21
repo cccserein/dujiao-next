@@ -2,7 +2,7 @@
 import { onMounted, computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
-import type { AdminMemberLevel } from '@/api/types'
+import type { AdminGatewaySecurityTestResult, AdminMemberLevel } from '@/api/types'
 import { getLocalizedText } from '@/utils/format'
 import { resolveOkpayChannelTypeFromConfig } from '@/utils/paymentChannelDisplay'
 import MediaPicker from '@/components/admin/MediaPicker.vue'
@@ -32,6 +32,8 @@ const error = ref('')
 const showAdvanced = ref(false)
 const applyingChannelData = ref(false)
 const configJsonPlaceholder = '{ "key": "value" }'
+const testingWechatPublicKey = ref(false)
+const wechatPublicKeyTestResult = ref<AdminGatewaySecurityTestResult | null>(null)
 
 const form = reactive({
   name: '',
@@ -121,6 +123,9 @@ const wechatConfig = reactive({
   merchant_serial_no: '',
   merchant_private_key: '',
   api_v3_key: '',
+  verification_mode: 'platform_certificate',
+  wechatpay_public_key_id: '',
+  wechatpay_public_key: '',
   notify_url: '',
   h5_redirect_url: '',
   h5_type: 'WAP',
@@ -390,6 +395,9 @@ const resetWechatConfig = () => {
   wechatConfig.merchant_serial_no = ''
   wechatConfig.merchant_private_key = ''
   wechatConfig.api_v3_key = ''
+  wechatConfig.verification_mode = 'platform_certificate'
+  wechatConfig.wechatpay_public_key_id = ''
+  wechatConfig.wechatpay_public_key = ''
   wechatConfig.notify_url = ''
   wechatConfig.h5_redirect_url = ''
   wechatConfig.h5_type = 'WAP'
@@ -530,6 +538,12 @@ const applyWechatConfig = (raw: Record<string, unknown>) => {
   wechatConfig.merchant_serial_no = String(raw.merchant_serial_no || '')
   wechatConfig.merchant_private_key = String(raw.merchant_private_key || '')
   wechatConfig.api_v3_key = String(raw.api_v3_key || '')
+  const verificationMode = String(raw.verification_mode || 'platform_certificate').trim().toLowerCase()
+  wechatConfig.verification_mode = ['platform_certificate', 'wechatpay_public_key', 'combined'].includes(verificationMode)
+    ? verificationMode
+    : 'platform_certificate'
+  wechatConfig.wechatpay_public_key_id = String(raw.wechatpay_public_key_id || '')
+  wechatConfig.wechatpay_public_key = String(raw.wechatpay_public_key || '')
   wechatConfig.notify_url = String(raw.notify_url || '')
   wechatConfig.h5_redirect_url = String(raw.h5_redirect_url || '')
   wechatConfig.h5_type = String(raw.h5_type || 'WAP').toUpperCase()
@@ -702,6 +716,11 @@ const buildWechatConfig = () => {
   setIfNotEmpty('merchant_serial_no', wechatConfig.merchant_serial_no)
   setIfNotEmpty('merchant_private_key', wechatConfig.merchant_private_key)
   setIfNotEmpty('api_v3_key', wechatConfig.api_v3_key)
+  setIfNotEmpty('verification_mode', wechatConfig.verification_mode)
+  if (wechatConfig.verification_mode !== 'platform_certificate') {
+    setIfNotEmpty('wechatpay_public_key_id', wechatConfig.wechatpay_public_key_id)
+    setIfNotEmpty('wechatpay_public_key', wechatConfig.wechatpay_public_key)
+  }
   setIfNotEmpty('notify_url', wechatConfig.notify_url)
   setIfNotEmpty('h5_redirect_url', wechatConfig.h5_redirect_url)
   setIfNotEmpty('h5_type', wechatConfig.h5_type)
@@ -961,6 +980,7 @@ watch(
 // --- Reset form for create mode ---
 function resetFormForCreate() {
   error.value = ''
+  wechatPublicKeyTestResult.value = null
   showAdvanced.value = false
   applyingChannelData.value = true
   form.name = ''
@@ -999,6 +1019,7 @@ watch(
   () => props.channelId,
   async (id) => {
     error.value = ''
+    wechatPublicKeyTestResult.value = null
     showAdvanced.value = false
     if (id === null) {
       // Create mode: reset form
@@ -1056,6 +1077,23 @@ watch(
 )
 
 // --- Submit ---
+
+const handleWechatPublicKeyTest = async () => {
+  if (!props.channelId || testingWechatPublicKey.value) {
+    return
+  }
+  error.value = ''
+  wechatPublicKeyTestResult.value = null
+  testingWechatPublicKey.value = true
+  try {
+    const response = await adminAPI.testWechatPayPublicKey(props.channelId)
+    wechatPublicKeyTestResult.value = response.data.data as AdminGatewaySecurityTestResult
+  } catch (err: any) {
+    error.value = err?.message || t('admin.paymentChannels.modal.wechatPublicKeyTestFailed')
+  } finally {
+    testingWechatPublicKey.value = false
+  }
+}
 
 const handleSubmit = async () => {
   error.value = ''
@@ -1491,6 +1529,28 @@ const closeModal = () => {
               <Input v-model="wechatConfig.api_v3_key" :placeholder="t('admin.paymentChannels.modal.wechatApiV3KeyPlaceholder')" />
             </div>
             <div class="min-w-0 md:col-span-2">
+              <label class="block text-xs font-medium text-muted-foreground mb-1.5">{{ t('admin.paymentChannels.modal.wechatVerificationMode') }}</label>
+              <Select v-model="wechatConfig.verification_mode">
+                <SelectTrigger class="h-9 w-full">
+                  <SelectValue :placeholder="t('admin.paymentChannels.modal.wechatVerificationModePlatformCertificate')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="platform_certificate">{{ t('admin.paymentChannels.modal.wechatVerificationModePlatformCertificate') }}</SelectItem>
+                  <SelectItem value="wechatpay_public_key">{{ t('admin.paymentChannels.modal.wechatVerificationModePublicKey') }}</SelectItem>
+                  <SelectItem value="combined">{{ t('admin.paymentChannels.modal.wechatVerificationModeCombined') }}</SelectItem>
+                </SelectContent>
+              </Select>
+              <p class="text-xs text-muted-foreground mt-1">{{ t('admin.paymentChannels.modal.wechatVerificationModeHint') }}</p>
+            </div>
+            <div v-if="wechatConfig.verification_mode !== 'platform_certificate'" class="min-w-0">
+              <label class="block text-xs font-medium text-muted-foreground mb-1.5">{{ t('admin.paymentChannels.modal.wechatPublicKeyId') }}</label>
+              <Input v-model="wechatConfig.wechatpay_public_key_id" :placeholder="t('admin.paymentChannels.modal.wechatPublicKeyIdPlaceholder')" />
+            </div>
+            <div v-if="wechatConfig.verification_mode !== 'platform_certificate'" class="min-w-0 md:col-span-2">
+              <label class="block text-xs font-medium text-muted-foreground mb-1.5">{{ t('admin.paymentChannels.modal.wechatPublicKey') }}</label>
+              <Textarea v-model="wechatConfig.wechatpay_public_key" rows="4" :placeholder="t('admin.paymentChannels.modal.wechatPublicKeyPlaceholder')" />
+            </div>
+            <div class="min-w-0 md:col-span-2">
               <label class="block text-xs font-medium text-muted-foreground mb-1.5">{{ t('admin.paymentChannels.modal.wechatMerchantPrivateKey') }}</label>
               <Textarea v-model="wechatConfig.merchant_private_key" rows="4" :placeholder="t('admin.paymentChannels.modal.wechatMerchantPrivateKeyPlaceholder')" />
             </div>
@@ -1522,6 +1582,42 @@ const closeModal = () => {
             <div class="min-w-0">
               <label class="block text-xs font-medium text-muted-foreground mb-1.5">{{ t('admin.paymentChannels.modal.exchangeRate') }}</label>
               <Input v-model="wechatConfig.exchange_rate" :placeholder="t('admin.paymentChannels.modal.exchangeRatePlaceholder')" />
+            </div>
+          </div>
+          <div class="mt-4 rounded-lg border border-border bg-background/70 p-3">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div class="text-sm font-medium text-foreground">{{ t('admin.paymentChannels.modal.wechatPublicKeyTestTitle') }}</div>
+                <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.paymentChannels.modal.wechatPublicKeyTestHint') }}</p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                class="w-full shrink-0 sm:w-auto"
+                :disabled="!isEditing || wechatConfig.verification_mode === 'platform_certificate' || testingWechatPublicKey"
+                @click="handleWechatPublicKeyTest"
+              >
+                {{ testingWechatPublicKey ? t('admin.paymentChannels.modal.wechatPublicKeyTesting') : t('admin.paymentChannels.modal.wechatPublicKeyTest') }}
+              </Button>
+            </div>
+            <p v-if="!isEditing" class="mt-2 text-xs text-amber-600 dark:text-amber-400">
+              {{ t('admin.paymentChannels.modal.wechatPublicKeyTestSaveFirst') }}
+            </p>
+            <p v-else-if="wechatConfig.verification_mode === 'platform_certificate'" class="mt-2 text-xs text-amber-600 dark:text-amber-400">
+              {{ t('admin.paymentChannels.modal.wechatPublicKeyTestModeRequired') }}
+            </p>
+            <div v-if="wechatPublicKeyTestResult" class="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-700 dark:text-emerald-300">
+              <div class="font-medium">{{ t('admin.paymentChannels.modal.wechatPublicKeyTestSuccess') }}</div>
+              <div class="mt-2 grid gap-1 sm:grid-cols-2">
+                <span>{{ t('admin.paymentChannels.modal.wechatPublicKeyTestSerial') }}</span>
+                <span class="break-all font-mono sm:text-right">{{ wechatPublicKeyTestResult.response_serial }}</span>
+                <span>{{ t('admin.paymentChannels.modal.wechatPublicKeyTestRequestSignature') }}</span>
+                <span class="sm:text-right">{{ wechatPublicKeyTestResult.request_signature_accepted ? t('admin.paymentChannels.modal.wechatPublicKeyTestPassed') : t('admin.paymentChannels.modal.wechatPublicKeyTestFailed') }}</span>
+                <span>{{ t('admin.paymentChannels.modal.wechatPublicKeyTestResponseSignature') }}</span>
+                <span class="sm:text-right">{{ wechatPublicKeyTestResult.response_signature_valid ? t('admin.paymentChannels.modal.wechatPublicKeyTestPassed') : t('admin.paymentChannels.modal.wechatPublicKeyTestFailed') }}</span>
+                <span>{{ t('admin.paymentChannels.modal.wechatPublicKeyTestEcho') }}</span>
+                <span class="sm:text-right">{{ wechatPublicKeyTestResult.echo_message_matched ? t('admin.paymentChannels.modal.wechatPublicKeyTestPassed') : t('admin.paymentChannels.modal.wechatPublicKeyTestFailed') }}</span>
+              </div>
             </div>
           </div>
           <div class="mt-3 text-xs text-muted-foreground">{{ t('admin.paymentChannels.modal.wechatHint') }}</div>

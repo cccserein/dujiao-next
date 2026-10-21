@@ -92,10 +92,12 @@ func TestOrderRepositoryTenantScopePointQueriesAndLists(t *testing.T) {
 	child := seedScopedOrder(t, db, "SCOPE-R1-CHILD", user.ID, "", "", constants.OrderStatusPaid, &resellerOne, &resellerOrder.ID)
 	guestMain := seedScopedOrder(t, db, "GUEST-MAIN", 0, "guest@example.com", "code", constants.OrderStatusPendingPayment, nil, nil)
 	guestReseller := seedScopedOrder(t, db, "GUEST-R1", 0, "guest@example.com", "code", constants.OrderStatusPaid, &resellerOne, nil)
+	guestResellerChild := seedScopedOrder(t, db, "GUEST-R1-CHILD", 0, "guest@example.com", "code", constants.OrderStatusPaid, &resellerOne, &guestReseller.ID)
 	_ = resellerTwoOrder
 	_ = child
 	_ = guestMain
 	_ = guestReseller
+	_ = guestResellerChild
 	if _, err := repo.BackfillGuestCredentialHashes(); err != nil {
 		t.Fatalf("hash seeded guest credentials failed: %v", err)
 	}
@@ -158,6 +160,18 @@ func TestOrderRepositoryTenantScopePointQueriesAndLists(t *testing.T) {
 		t.Fatalf("GetByIDAndGuestScoped reseller from other reseller failed: %v", err)
 	}
 	assertOrderMissing(t, guestGot)
+	guestGot, err = repo.GetAnyByOrderNoAndGuestScoped(guestResellerChild.OrderNo, "guest@example.com", "code", resellerOneScope)
+	if err != nil {
+		t.Fatalf("GetAnyByOrderNoAndGuestScoped child failed: %v", err)
+	}
+	assertOrderFound(t, guestGot, guestResellerChild.OrderNo)
+	for _, scope := range []ordercontract.TenantScope{mainScope, resellerTwoScope} {
+		guestGot, err = repo.GetAnyByOrderNoAndGuestScoped(guestResellerChild.OrderNo, "guest@example.com", "code", scope)
+		if err != nil {
+			t.Fatalf("cross-tenant guest child lookup failed: %v", err)
+		}
+		assertOrderMissing(t, guestGot)
+	}
 
 	mainRows, mainTotal, err := repo.ListByUserScoped(ordercontract.ListFilter{UserID: user.ID, Page: 1, PageSize: 20}, mainScope)
 	if err != nil {

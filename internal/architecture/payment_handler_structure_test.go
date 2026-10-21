@@ -42,7 +42,7 @@ func TestPaymentHTTPLivesInTransport(t *testing.T) {
 	})
 	assertFileDeclaresFunctions(t, filepath.Join(transportRoot, "admin_channel_handler.go"), []string{
 		"NewAdminChannelHandler", "CreatePaymentChannel", "UpdatePaymentChannel",
-		"DeletePaymentChannel", "GetPaymentChannel", "GetPaymentChannels",
+		"DeletePaymentChannel", "GetPaymentChannel", "GetPaymentChannels", "TestWechatPayPublicKey",
 	})
 	assertFileDeclaresTypes(t, filepath.Join(transportRoot, "webhook_handler.go"), []string{
 		"WebhookHandler", "PaymentWebhookService", "ExceptionAlerter", "WebhookCallbackInput",

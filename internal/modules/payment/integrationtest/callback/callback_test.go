@@ -1,7 +1,9 @@
 package paymentcallback_test
 
 import (
+	"crypto/hmac"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -317,10 +319,10 @@ func TestPaymentCallbackLegacyEpayRequiresExactBusinessAndGatewayOrder(t *testin
 	}
 }
 
-func TestPaymentCallbackHandlesOkpay(t *testing.T) {
+func TestPaymentCallbackRejectsOkpayFormEncodedBody(t *testing.T) {
 	fixture := newOkpayCallbackFixture(t)
-	bodyWithoutSign := "code=200&data[order_id]=OKPAY-ORDER-1&data[unique_id]=DJP9001&data[pay_user_id]=7238234930&data[amount]=616.00000000&data[coin]=USDT&data[status]=1&data[type]=deposit&id=shop-1&status=success"
-	sign := md5HexUpper(bodyWithoutSign + "&token=token-1")
+	bodyWithoutSign := "code=200&data.order_id=OKPAY-ORDER-1&data.unique_id=DJP9001&data.pay_user_id=7238234930&data.amount=616.00000000&data.coin=USDT&data.status=1&data.type=deposit&id=shop-1&status=success"
+	sign := hmacSHA256HexUpper(bodyWithoutSign, "token-1")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(bodyWithoutSign+"&sign="+sign))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -329,50 +331,9 @@ func TestPaymentCallbackHandlesOkpay(t *testing.T) {
 
 	fixture.handler.PaymentCallback(c)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
-	}
-	if strings.TrimSpace(w.Body.String()) != constants.OkpayCallbackSuccess {
-		t.Fatalf("unexpected response body: %s", w.Body.String())
-	}
-
-	updatedPayment, err := fixture.paymentRepo.GetByID(fixture.payment.ID)
-	if err != nil {
-		t.Fatalf("reload payment failed: %v", err)
-	}
-	if updatedPayment == nil || updatedPayment.Status != constants.PaymentStatusSuccess {
-		t.Fatalf("payment status not updated: %+v", updatedPayment)
-	}
-	updatedOrder, err := fixture.orderRepo.GetByID(fixture.order.ID)
-	if err != nil {
-		t.Fatalf("reload order failed: %v", err)
-	}
-	if updatedOrder == nil || updatedOrder.Status != constants.OrderStatusPaid {
-		t.Fatalf("order status not updated: %+v", updatedOrder)
-	}
-}
-
-func TestPaymentCallbackRejectsOkpayMismatchedMerchantOrder(t *testing.T) {
-	fixture := newOkpayCallbackFixture(t)
-	bodyWithoutSign := "code=200&data[order_id]=OKPAY-ORDER-1&data[unique_id]=WRONG-MERCHANT-ORDER&data[pay_user_id]=7238234930&data[amount]=616.00000000&data[coin]=USDT&data[status]=1&data[type]=deposit&id=shop-1&status=success"
-	sign := md5HexUpper(bodyWithoutSign + "&token=token-1")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(bodyWithoutSign+"&sign="+sign))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = req
-
-	fixture.handler.PaymentCallback(c)
-
-	if strings.TrimSpace(w.Body.String()) != constants.OkpayCallbackFail {
-		t.Fatalf("mismatched merchant order must return provider failure acknowledgement, status=%d body=%s", w.Code, w.Body.String())
-	}
-	updatedPayment, err := fixture.paymentRepo.GetByID(fixture.payment.ID)
-	if err != nil {
-		t.Fatalf("reload payment failed: %v", err)
-	}
-	if updatedPayment == nil || updatedPayment.Status != constants.PaymentStatusPending {
-		t.Fatalf("mismatched callback changed payment state: %+v", updatedPayment)
+	// 新协议下 OKPay 只发 JSON 回调,form-encoded body 不应被任何 handler 识别。
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("form-encoded okpay callback should be unrecognized, got status %d body %s", w.Code, w.Body.String())
 	}
 }
 
@@ -431,6 +392,13 @@ func TestPaymentCallbackRejectsOkpayJSONCurrencyMismatch(t *testing.T) {
 	assertOkpayCallbackRejected(t, fixture, w)
 }
 
+func TestPaymentCallbackRejectsOkpayJSONReplayedForDifferentMerchantOrder(t *testing.T) {
+	fixture := newOkpayCallbackFixture(t)
+	body := signedOkpayJSONCallbackForOrder("616.00000000", "USDT", "DJP9002", "token-1")
+	w := performOkpayJSONCallback(t, fixture, body)
+	assertOkpayCallbackRejected(t, fixture, w)
+}
+
 func performOkpayJSONCallback(t *testing.T, fixture *okpayCallbackFixture, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(body))
@@ -467,21 +435,29 @@ func assertOkpayCallbackRejected(t *testing.T, fixture *okpayCallbackFixture, w 
 }
 
 func signedOkpayJSONCallback(amount string, coin string, token string) string {
+	return signedOkpayJSONCallbackForOrder(amount, coin, "DJP9001", token)
+}
+
+func signedOkpayJSONCallbackForOrder(amount string, coin string, merchantOrderNo string, token string) string {
 	bodyWithoutSign := fmt.Sprintf(
-		`{"code":200,"data":{"order_id":"OKPAY-ORDER-1","unique_id":"DJP9001","pay_user_id":"7238234930","amount":%q,"coin":%q,"status":1,"type":"deposit"},"id":"shop-1","status":"success"}`,
+		`{"code":200,"data":{"order_id":"OKPAY-ORDER-1","unique_id":%q,"pay_user_id":"7238234930","amount":%q,"coin":%q,"status":1,"type":"deposit"},"id":"shop-1","status":"success"}`,
+		merchantOrderNo,
 		amount,
 		coin,
 	)
+	// 新协议签名原文用点号展开嵌套 data,不做 URL 编码。
 	signBase := fmt.Sprintf(
-		`code=200&data[order_id]=OKPAY-ORDER-1&data[unique_id]=DJP9001&data[pay_user_id]=7238234930&data[amount]=%s&data[coin]=%s&data[status]=1&data[type]=deposit&id=shop-1&status=success`,
+		`code=200&data.amount=%s&data.coin=%s&data.order_id=OKPAY-ORDER-1&data.pay_user_id=7238234930&data.status=1&data.type=deposit&data.unique_id=%s&id=shop-1&status=success`,
 		amount,
 		coin,
+		merchantOrderNo,
 	)
-	sign := md5HexUpper(signBase + "&token=" + token)
+	sign := hmacSHA256HexUpper(signBase, token)
 	return strings.TrimSuffix(bodyWithoutSign, "}") + `,"sign":"` + sign + `"}`
 }
 
-func md5HexUpper(raw string) string {
-	sum := md5.Sum([]byte(raw))
-	return strings.ToUpper(hex.EncodeToString(sum[:]))
+func hmacSHA256HexUpper(base string, token string) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte(base))
+	return strings.ToUpper(hex.EncodeToString(mac.Sum(nil)))
 }

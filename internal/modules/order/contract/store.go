@@ -12,6 +12,7 @@ import (
 	resellercontract "github.com/dujiao-next/internal/modules/reseller/contract"
 	resellerdomain "github.com/dujiao-next/internal/modules/reseller/domain"
 	walletcontract "github.com/dujiao-next/internal/modules/wallet/contract"
+	"github.com/dujiao-next/internal/shared/money"
 )
 
 // Store 是订单应用层所需的完整持久化端口。
@@ -56,6 +57,8 @@ type Store interface {
 
 	CreateRefundRecord(record *orderdomain.OrderRefundRecord) error
 	GetRefundRecordByID(id uint) (*orderdomain.OrderRefundRecord, error)
+	GetRefundRecordByIDForUpdate(id uint) (*orderdomain.OrderRefundRecord, error)
+	UpdateRefundRecordPaymentFee(id uint, refunded bool, amount money.Amount, updatedAt time.Time) error
 	ListRefundRecordsByOrderIDs(orderIDs []uint) ([]orderdomain.OrderRefundRecord, error)
 	ListRefundRecordsAdmin(filter RefundRecordListFilter) ([]orderdomain.OrderRefundRecord, int64, error)
 

@@ -18,6 +18,7 @@ type Store interface {
 	ListByOrderID(orderID uint) ([]paymentdomain.Payment, error)
 	GetLatestPendingByOrder(orderID uint, now time.Time) (*paymentdomain.Payment, error)
 	GetLatestPendingByOrderChannel(orderID, channelID uint, now time.Time) (*paymentdomain.Payment, error)
+	SupersedePendingByOrderID(orderID, replacementPaymentID uint, supersededAt time.Time) (int64, error)
 	ExpirePendingByOrderIDs(orderIDs []uint, expiredAt time.Time) (int64, error)
 	ListAdmin(filter ListFilter) ([]paymentdomain.Payment, int64, error)
 	GetByIDForUpdate(id uint) (*paymentdomain.Payment, error)

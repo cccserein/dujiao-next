@@ -213,6 +213,7 @@ func (s *PaymentService) GetAvailableChannels(filter AvailablePaymentChannelFilt
 	if err != nil {
 		return nil, err
 	}
+	customerFeeEnabled := s.settingService != nil && s.settingService.GetPaymentFeeConfig().CustomerFeeEnabled
 	available := make([]map[string]interface{}, 0, len(channels))
 	for _, channel := range channels {
 		if !matchesChannelAmount(channel, filter.TargetAmount) ||
@@ -224,9 +225,13 @@ func (s *PaymentService) GetAvailableChannels(filter AvailablePaymentChannelFilt
 		item := map[string]interface{}{
 			"id": channel.ID, "name": channel.Name,
 			"provider_type": channel.ProviderType, "channel_type": channel.ChannelType,
-			"interaction_mode": channel.InteractionMode, "fee_rate": channel.FeeRate,
-			"fixed_fee": channel.FixedFee, "min_amount": channel.MinAmount,
+			"interaction_mode": channel.InteractionMode, "min_amount": channel.MinAmount,
 			"max_amount": channel.MaxAmount, "hide_amount_out_range": channel.HideAmountOutRange,
+		}
+		if customerFeeEnabled {
+			item["fee_policy"] = constants.PaymentFeePolicyCustomerSurcharge
+			item["fee_rate"] = channel.FeeRate
+			item["fixed_fee"] = channel.FixedFee
 		}
 		if channel.Icon != "" {
 			item["icon"] = channel.Icon

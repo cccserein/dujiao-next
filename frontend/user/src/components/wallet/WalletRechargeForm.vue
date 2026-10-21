@@ -51,17 +51,17 @@
         </Button>
       </div>
     </form>
-    <div v-if="selectedChannel" class="mt-4 grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
-      <div class="rounded-xl border p-4">
-        <div class="text-xs text-muted-foreground">{{ t('payment.feeRateLabel') }}</div>
+    <div v-if="selectedChannel?.fee_policy === 'customer_surcharge'" class="mt-4 grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+      <div class="rounded-xl border border-warning/40 p-4">
+        <div class="text-xs text-warning">{{ t('payment.feeRateLabel') }}</div>
         <div class="mt-1 font-semibold text-foreground">{{ feeRateDisplay }}</div>
       </div>
-      <div class="rounded-xl border p-4">
-        <div class="text-xs text-muted-foreground">{{ t('payment.fixedFeeLabel') }}</div>
+      <div class="rounded-xl border border-warning/40 p-4">
+        <div class="text-xs text-warning">{{ t('payment.fixedFeeLabel') }}</div>
         <div class="mt-1 font-semibold text-foreground">{{ fixedFeeDisplay }}</div>
       </div>
-      <div class="rounded-xl border p-4">
-        <div class="text-xs text-muted-foreground">{{ t('payment.feeAmountLabel') }}</div>
+      <div class="rounded-xl border border-warning/40 p-4">
+        <div class="text-xs text-warning">{{ t('payment.feeAmountLabel') }}</div>
         <div class="mt-1 font-semibold text-foreground">{{ feeAmountDisplay }}</div>
       </div>
     </div>
@@ -91,7 +91,7 @@ defineProps<{
   hasChannels: boolean
   channelLoading: boolean
   recharging: boolean
-  selectedChannel: { id: number; name: string } | null
+  selectedChannel: { id: number; name: string; fee_policy?: string } | null
   feeRateDisplay: string
   fixedFeeDisplay: string
   feeAmountDisplay: string

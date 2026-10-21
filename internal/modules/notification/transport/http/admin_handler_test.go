@@ -1,9 +1,11 @@
 package notificationhttp
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +17,15 @@ import (
 
 type notificationLogServiceStub struct {
 	items []domain.NotificationLog
+}
+
+type notificationTestSenderStub struct {
+	input contract.TestSendInput
+}
+
+func (s *notificationTestSenderStub) SendTest(_ context.Context, input contract.TestSendInput) error {
+	s.input = input
+	return nil
 }
 
 func (s notificationLogServiceStub) ListForAdmin(filter contract.LogListFilter) ([]domain.NotificationLog, int64, error) {
@@ -99,5 +110,28 @@ func TestListNotificationLogsFiltersStatusAndChannel(t *testing.T) {
 	}
 	if resp.Data[0].Status != "failed" {
 		t.Fatalf("unexpected status: %s", resp.Data[0].Status)
+	}
+}
+
+func TestNotificationCenterTestSendAcceptsFeishuChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sender := &notificationTestSenderStub{}
+	h := &AdminHandler{sender: sender}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/admin/settings/notification-center/test",
+		strings.NewReader(`{"channel":" FEISHU ","target":" oc_demo ","scene":"exception_alert","locale":"zh-CN"}`),
+	)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.TestNotificationCenterSettings(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status want 200 got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.input.Channel != "feishu" || sender.input.Target != "oc_demo" {
+		t.Fatalf("unexpected test send input: %#v", sender.input)
 	}
 }

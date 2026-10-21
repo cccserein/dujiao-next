@@ -1,6 +1,6 @@
 <template>
-  <div class="flex flex-wrap justify-between gap-3.5 border-b py-3.5 first:pt-0 last:border-b-0 last:pb-0">
-    <div class="flex min-w-0 flex-1 gap-3">
+  <div class="flex flex-wrap justify-between gap-3.5 border-b py-3.5 first:pt-0 last:border-b-0 last:pb-0 max-[640px]:flex-col">
+    <div class="flex min-w-0 flex-1 gap-3 max-[640px]:flex-none">
       <div class="grid h-[60px] w-[60px] flex-none place-items-center overflow-hidden rounded-sm border bg-secondary">
         <img
           v-if="orderItemImage(item)"
@@ -28,7 +28,7 @@
         </div>
       </div>
     </div>
-    <div class="grid min-w-[180px] content-start gap-0.5 text-right text-[12.5px] text-muted-foreground max-[640px]:min-w-0 max-[640px]:text-left">
+    <div class="grid min-w-[180px] content-start gap-0.5 text-right text-[12.5px] text-muted-foreground max-[640px]:min-w-0 max-[640px]:pl-[72px] max-[640px]:text-left">
       <div>{{ t('orderDetail.unitPriceLabel') }}：{{ formatMoney(item.original_unit_price, currency) }}</div>
       <div>{{ t('orderDetail.totalPriceLabel') }}：{{ formatMoney(item.original_total_price, currency) }}</div>
       <div v-if="hasDiscountAmount(item.coupon_discount_amount)" class="text-destructive">{{ t('orderDetail.couponDiscountLabel') }}：{{ formatDiscountMoney(item.coupon_discount_amount, currency) }}</div>

@@ -5,7 +5,7 @@ import QRCode from 'qrcode'
 import { walletAPI } from '../api/wallet'
 import { useTelegramMiniAppStore } from '../stores/telegramMiniApp'
 import { copyText } from '../utils/clipboard'
-import { basisPointsToPercent, rateToBasisPoints } from '../utils/money'
+import { isCustomerSurchargePayment, resolvePaymentLinkNavigationTarget, resolvePaymentPresentationMode, shouldAutoOpenPaymentLink } from '../utils/paymentResumePolicy'
 import type { BadgeTone } from '../utils/status'
 
 /**
@@ -34,19 +34,20 @@ export function useRechargeOrderDetail() {
   })
 
   const payLink = computed(() => String(payment.value?.pay_url || '').trim())
-  const interactionMode = computed(() => String(payment.value?.interaction_mode || '').toLowerCase())
+  const interactionMode = computed(() => String(payment.value?.interaction_mode || '').trim().toLowerCase())
+  const paymentPresentationMode = computed(() => resolvePaymentPresentationMode(interactionMode.value))
   const isTelegramMiniApp = computed(() => telegramMiniAppStore.isMiniApp && telegramMiniAppStore.isReady)
   const showTelegramPayHint = computed(() => isTelegramMiniApp.value && Boolean(payLink.value))
 
   const qrCodeContent = computed(() => String(payment.value?.qr_code || '').trim())
   const qrFallbackContent = computed(() => {
-    if (interactionMode.value === 'redirect') return ''
+    if (paymentPresentationMode.value === 'redirect') return ''
     if (qrCodeContent.value) return ''
     return payLink.value
   })
   const qrDisplayContent = computed(() => qrCodeContent.value || qrFallbackContent.value)
   const qrUsingPayLinkFallback = computed(() => Boolean(!qrCodeContent.value && qrFallbackContent.value))
-  const showQRCode = computed(() => interactionMode.value !== 'redirect' && Boolean(qrImageUrl.value))
+  const showQRCode = computed(() => paymentPresentationMode.value === 'qr' && Boolean(qrImageUrl.value))
   const cryptoWalletAddress = computed(() => String(payment.value?.wallet_address || '').trim())
   const cryptoChainAmount = computed(() => String(payment.value?.chain_amount || '').trim())
   const cryptoChain = computed(() => String(payment.value?.chain || '').trim())
@@ -91,11 +92,8 @@ export function useRechargeOrderDetail() {
     return details
   })
   const hasCryptoPaymentDetails = computed(() => cryptoPaymentDetails.value.length > 0)
-
-  const feeRateDisplay = computed(() => {
-    const rate = rateToBasisPoints(recharge.value?.fee_rate ?? payment.value?.fee_rate)
-    if (rate === null) return '0.00%'
-    return `${basisPointsToPercent(rate)}%`
+  const customerFeeApplied = computed(() => {
+    return isCustomerSurchargePayment(payment.value) && Number(recharge.value?.fee_amount || 0) > 0
   })
 
   const rechargeStatusText = (status?: string) => {
@@ -145,6 +143,7 @@ export function useRechargeOrderDetail() {
       qr_code: payload.qr_code,
       expires_at: payload.expires_at,
       status: payload.status,
+      fee_policy: payload.fee_policy,
     } : undefined)
     if (paymentData) {
       payment.value = paymentData
@@ -215,7 +214,7 @@ export function useRechargeOrderDetail() {
     }
   }
 
-  const handleOpenPayLink = () => {
+  const openPayLinkInCompatibleWindow = (automatic: boolean) => {
     if (!payLink.value) return
     if (isTelegramMiniApp.value) {
       try {
@@ -223,9 +222,15 @@ export function useRechargeOrderDetail() {
       } catch {
         window.open(payLink.value, '_blank')
       }
+    } else if (resolvePaymentLinkNavigationTarget(automatic) === 'current-tab') {
+      window.location.assign(payLink.value)
     } else {
       window.open(payLink.value, '_blank')
     }
+  }
+
+  const handleOpenPayLink = () => {
+    openPayLinkInCompatibleWindow(false)
   }
 
   const handleCopyWalletAddress = async () => {
@@ -282,9 +287,9 @@ export function useRechargeOrderDetail() {
     await loadDetail()
     if (isPending.value) {
       startPolling()
-      // Auto-redirect for redirect mode
-      if (payLink.value && interactionMode.value === 'redirect') {
-        handleOpenPayLink()
+      // 自动跳转类支付使用当前标签页，避免异步加载后被浏览器拦截为弹窗。
+      if (shouldAutoOpenPaymentLink(payment.value)) {
+        openPayLinkInCompatibleWindow(true)
       }
     }
   })
@@ -312,7 +317,7 @@ export function useRechargeOrderDetail() {
     cryptoWalletAddress,
     cryptoPaymentDetails,
     hasCryptoPaymentDetails,
-    feeRateDisplay,
+    customerFeeApplied,
     rechargeStatusText,
     rechargeStatusVariant,
     rechargeStatusPillClass,

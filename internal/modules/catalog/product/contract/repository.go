@@ -7,6 +7,9 @@ import (
 )
 
 // ListFilter 描述 Catalog 商品列表的持久化筛选条件。
+//
+// IsActive 与 OnlyActive 都是上架状态条件，分工不同：OnlyActive 是公开侧强制的
+// 「必须上架」开关；IsActive 是后台可选的三态筛选，nil 不限、true 仅已上架、false 仅已下架。
 type ListFilter struct {
 	Page               int
 	PageSize           int
@@ -19,6 +22,7 @@ type ListFilter struct {
 	HasWholesalePrices *bool
 	LowStockThreshold  int
 	OnlyActive         bool
+	IsActive           *bool
 	WithCategory       bool
 	UpdatedAfter       *time.Time
 }

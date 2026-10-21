@@ -247,13 +247,24 @@ func KeyByUserIDAndIP(c *gin.Context) string {
 	return fmt.Sprintf("%v|%s", userID, c.ClientIP())
 }
 
-// KeyByUpstreamApiKey 使用上游 API Key 作为限流 key
-func KeyByUpstreamApiKey(c *gin.Context) string {
-	apiKey := c.GetHeader("Dujiao-Next-Api-Key")
-	if apiKey != "" {
-		return apiKey
+// KeyByIPAndHeader 以 "IP|header 值" 作为限流 key。
+// 限流位于鉴权之前，header 未经校验，因此计数必须同时绑定来源 IP。
+func KeyByIPAndHeader(header string) RateLimitKeyFunc {
+	return func(c *gin.Context) string {
+		value := c.GetHeader(header)
+		if len(value) > 128 {
+			value = value[:128]
+		}
+		if value == "" {
+			return c.ClientIP()
+		}
+		return c.ClientIP() + "|" + value
 	}
-	return c.ClientIP()
+}
+
+// KeyByUpstreamApiKey 使用 "IP|上游 API Key" 作为限流 key
+func KeyByUpstreamApiKey(c *gin.Context) string {
+	return KeyByIPAndHeader("Dujiao-Next-Api-Key")(c)
 }
 
 // KeyByIPAndJSONField 使用 IP + JSON 字段作为限流 key
@@ -267,16 +278,29 @@ func KeyByIPAndJSONField(field string) RateLimitKeyFunc {
 	}
 }
 
+const maxRateLimitJSONFieldBodyBytes = 64 << 10
+
+type replayReadCloser struct {
+	io.Reader
+	original io.ReadCloser
+}
+
+func (r replayReadCloser) Close() error { return r.original.Close() }
+
 func readJSONField(c *gin.Context, field string) string {
 	if c == nil || c.Request == nil || c.Request.Body == nil {
 		return ""
 	}
-	body, err := io.ReadAll(c.Request.Body)
+	if c.Request.ContentLength > maxRateLimitJSONFieldBodyBytes {
+		return ""
+	}
+	original := c.Request.Body
+	body, err := io.ReadAll(io.LimitReader(original, maxRateLimitJSONFieldBodyBytes+1))
+	c.Request.Body = replayReadCloser{Reader: io.MultiReader(bytes.NewReader(body), original), original: original}
 	if err != nil {
 		return ""
 	}
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
-	if len(body) == 0 {
+	if len(body) == 0 || len(body) > maxRateLimitJSONFieldBodyBytes {
 		return ""
 	}
 	var payload map[string]interface{}

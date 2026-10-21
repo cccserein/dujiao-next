@@ -3,8 +3,10 @@ package httpserver
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/dujiao-next/internal/app/httpserver/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -39,6 +41,59 @@ func TestConfigureTrustedProxiesAcceptsForwardedIPFromConfiguredProxy(t *testing
 	engine.ServeHTTP(resp, req)
 	if resp.Body.String() != "1.2.3.4" {
 		t.Fatalf("trusted proxy client IP=%q, want 1.2.3.4", resp.Body.String())
+	}
+}
+
+func TestConfigureTrustedProxiesIgnoresClientPrependedForwardedIP(t *testing.T) {
+	engine := gin.New()
+	if err := configureTrustedProxies(engine, []string{"127.0.0.1/32"}); err != nil {
+		t.Fatal(err)
+	}
+	engine.GET("/ip", func(c *gin.Context) { c.String(http.StatusOK, c.ClientIP()) })
+
+	// Nginx appends the actual peer to a client-supplied X-Forwarded-For chain.
+	// The rate limiter must use that peer, rather than the attacker-controlled first IP.
+	req := httptest.NewRequest(http.MethodGet, "/ip", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 203.0.113.9")
+	req.Header.Set("X-Real-IP", "1.2.3.4")
+	resp := httptest.NewRecorder()
+	engine.ServeHTTP(resp, req)
+	if resp.Body.String() != "203.0.113.9" {
+		t.Fatalf("client-prepended IP bypassed trusted proxy boundary: %q", resp.Body.String())
+	}
+}
+
+func TestLoginRateLimitIgnoresRotatingClientPrependedForwardedIP(t *testing.T) {
+	engine := gin.New()
+	if err := configureTrustedProxies(engine, []string{"127.0.0.1/32"}); err != nil {
+		t.Fatal(err)
+	}
+	engine.POST("/login", middleware.RateLimitMiddleware(nil, middleware.RateLimitRule{
+		WindowSeconds: 60,
+		MaxRequests:   1,
+	}, middleware.KeyByIPAndJSONField("email")), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	for i, forwarded := range []string{
+		"198.51.100.1, 203.0.113.9",
+		"198.51.100.2, 203.0.113.9",
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"email":"virtual@example.test"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", forwarded)
+		req.Header.Set("X-Real-IP", strings.Split(forwarded, ",")[0])
+		req.RemoteAddr = "127.0.0.1:1234"
+		resp := httptest.NewRecorder()
+		engine.ServeHTTP(resp, req)
+		want := http.StatusOK
+		if i == 1 {
+			want = http.StatusTooManyRequests
+		}
+		if resp.Code != want {
+			t.Fatalf("request %d with X-Forwarded-For %q: status=%d, want=%d", i+1, forwarded, resp.Code, want)
+		}
 	}
 }
 

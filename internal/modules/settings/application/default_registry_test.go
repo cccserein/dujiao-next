@@ -19,6 +19,7 @@ func TestDefaultSettingRegistryCoversLegacyNormalizedKeys(t *testing.T) {
 		constants.SettingKeyNotificationCenterConfig,
 		constants.SettingKeyOrderConfig,
 		constants.SettingKeyOrderRiskControlConfig,
+		constants.SettingKeyPaymentConfig,
 		constants.SettingKeyRegistrationConfig,
 		constants.SettingKeySiteConfig,
 		constants.SettingKeyTelegramAuthConfig,
@@ -107,5 +108,33 @@ func TestSettingServiceUpdateKeepsUnknownKeyPassThroughBehavior(t *testing.T) {
 	}
 	if saved := repo.store["custom_extension_config"]; !reflect.DeepEqual(saved, jsonmap.JSON(input)) {
 		t.Fatalf("unknown setting persisted with a different shape: %#v", saved)
+	}
+}
+
+func TestPaymentFeeConfigDefaultsSafeAndNormalizesSwitches(t *testing.T) {
+	repo := newMockSettingRepo()
+	service := NewService(repo)
+
+	if got := service.GetPaymentFeeConfig(); got != (PaymentFeeConfig{}) {
+		t.Fatalf("default payment fee config must be safe: %#v", got)
+	}
+
+	stored, err := service.Update(constants.SettingKeyPaymentConfig, map[string]interface{}{
+		constants.SettingFieldCustomerFeeEnabled:         "true",
+		constants.SettingFieldReuseLegacyOrderFeePayment: 1,
+		"unexpected": true,
+	})
+	if err != nil {
+		t.Fatalf("update payment fee config: %v", err)
+	}
+	want := jsonmap.JSON{
+		constants.SettingFieldCustomerFeeEnabled:         true,
+		constants.SettingFieldReuseLegacyOrderFeePayment: true,
+	}
+	if !reflect.DeepEqual(stored, want) {
+		t.Fatalf("normalized payment config mismatch: %#v", stored)
+	}
+	if got := service.GetPaymentFeeConfig(); got != (PaymentFeeConfig{CustomerFeeEnabled: true, ReuseLegacyOrderFeePayment: true}) {
+		t.Fatalf("payment fee config mismatch: %#v", got)
 	}
 }

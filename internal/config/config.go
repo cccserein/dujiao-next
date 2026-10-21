@@ -316,7 +316,7 @@ func Load() *Config {
 	viper.SetDefault("app.totp_issuer", "Dujiao-Next")
 	viper.SetDefault("server.host", "0.0.0.0")
 	viper.SetDefault("server.port", "8080")
-	viper.SetDefault("server.mode", "debug")
+	viper.SetDefault("server.mode", "release")
 	viper.SetDefault("server.trusted_proxies", []string{"127.0.0.1/32", "::1/128"})
 	viper.SetDefault("log.dir", "")
 	viper.SetDefault("log.filename", "app.log")

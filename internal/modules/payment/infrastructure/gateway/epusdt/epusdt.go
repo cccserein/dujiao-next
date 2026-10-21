@@ -378,8 +378,11 @@ func VerifyCallback(cfg *Config, data *CallbackData) error {
 		"block_transaction_id": data.BlockTransactionID,
 		"status":               data.Status,
 	}
+	if strings.TrimSpace(cfg.SecretKey) == "" {
+		return ErrConfigInvalid
+	}
 	expected := Sign(params, cfg.SecretKey)
-	if !strings.EqualFold(expected, data.Signature) {
+	if !hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(data.Signature))) {
 		return ErrSignatureInvalid
 	}
 	return nil

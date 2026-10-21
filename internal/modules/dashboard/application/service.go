@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -40,7 +41,7 @@ func (s *Service) GetOverview(ctx context.Context, input reportingdomain.Query) 
 
 	setting := s.loadSetting()
 
-	cacheKey := fmt.Sprintf("dashboard:overview:%s:%d:%d:%s:%d:%d:%d:%d",
+	cacheKey := fmt.Sprintf("dashboard:overview:%s:%d:%d:%s:%d:%d:%d:%d:%t",
 		window.Range,
 		window.StartAt.Unix(),
 		window.EndAt.Unix(),
@@ -49,6 +50,7 @@ func (s *Service) GetOverview(ctx context.Context, input reportingdomain.Query) 
 		setting.Alert.OutOfStockProductsThreshold,
 		setting.Alert.PendingPaymentOrdersThreshold,
 		setting.Alert.PaymentsFailedThreshold,
+		setting.Accounting.RefundReversesCost,
 	)
 	if !input.ForceRefresh {
 		var cached OverviewResponse
@@ -75,7 +77,8 @@ func (s *Service) GetOverview(ctx context.Context, input reportingdomain.Query) 
 		return nil, err
 	}
 
-	totalProfit := profitOverview.TotalRevenue - profitOverview.TotalCost
+	totalCost := effectiveDashboardCost(profitOverview.TotalCost, profitOverview.RefundedCost, setting.Accounting.RefundReversesCost) + profitOverview.PaymentFee
+	totalProfit := profitOverview.TotalRevenue - totalCost
 	profitMargin := 0.0
 	if profitOverview.TotalRevenue > 0 {
 		profitMargin = totalProfit / profitOverview.TotalRevenue * 100
@@ -109,7 +112,8 @@ func (s *Service) GetOverview(ctx context.Context, input reportingdomain.Query) 
 			PendingPaymentOrders: overview.PendingPaymentOrders,
 			ProcessingOrders:     overview.ProcessingOrders,
 			GMVPaid:              formatMoneyValue(overview.GMVPaid),
-			TotalCost:            formatMoneyValue(profitOverview.TotalCost),
+			TotalCost:            formatMoneyValue(totalCost),
+			PaymentFee:           formatMoneyValue(profitOverview.PaymentFee),
 			TotalProfit:          formatMoneyValue(totalProfit),
 			ProfitMargin:         formatPercentValue(profitMargin),
 			PaymentsTotal:        overview.PaymentsTotal,
@@ -174,7 +178,8 @@ func (s *Service) GetTrends(ctx context.Context, input reportingdomain.Query) (*
 		return nil, err
 	}
 
-	cacheKey := fmt.Sprintf("dashboard:trends:%s:%d:%d:%s", window.Range, window.StartAt.Unix(), window.EndAt.Unix(), window.Timezone)
+	setting := s.loadSetting()
+	cacheKey := fmt.Sprintf("dashboard:trends:%s:%d:%d:%s:%t", window.Range, window.StartAt.Unix(), window.EndAt.Unix(), window.Timezone, setting.Accounting.RefundReversesCost)
 	if !input.ForceRefresh {
 		var cached TrendResponse
 		hit, cacheErr := cache.GetJSON(ctx, cacheKey, &cached)
@@ -215,7 +220,8 @@ func (s *Service) GetTrends(ctx context.Context, input reportingdomain.Query) (*
 		orderItem := orderMap[day]
 		paymentItem := paymentMap[day]
 		profitItem := profitMap[day]
-		dayProfit := profitItem.Revenue - profitItem.Cost
+		dayCost := effectiveDashboardCost(profitItem.Cost, profitItem.RefundedCost, setting.Accounting.RefundReversesCost) + profitItem.PaymentFee
+		dayProfit := profitItem.Revenue - dayCost
 		points = append(points, TrendPoint{
 			Date:            day,
 			OrdersTotal:     orderItem.OrdersTotal,
@@ -347,6 +353,17 @@ func formatMoneyValue(value float64) string {
 
 func formatPercentValue(value float64) string {
 	return fmt.Sprintf("%.2f", value)
+}
+
+func effectiveDashboardCost(totalCost, refundedCost float64, refundReversesCost bool) float64 {
+	if !refundReversesCost {
+		return totalCost
+	}
+	result := totalCost - refundedCost
+	if math.Abs(result) < 0.000001 {
+		return 0
+	}
+	return result
 }
 
 func buildDashboardAlerts(overview dashboardcontract.OverviewRow, stockStats dashboardcontract.StockStatsRow, alertSetting settingsstorefront.DashboardAlertSetting) []AlertItem {

@@ -116,6 +116,9 @@ func (s *Service) UpdateProfile(userID uint, nickname, locale *string) (*userdom
 	if nickname != nil {
 		trimmed := strings.TrimSpace(*nickname)
 		if trimmed != "" {
+			if !userdomain.ValidDisplayName(trimmed) {
+				return nil, ErrNicknameInvalid
+			}
 			user.DisplayName = trimmed
 			updated = true
 		}
@@ -168,7 +171,7 @@ func (s *Service) SendChangeEmailCode(ctx context.Context, userID uint, kind, ne
 		}
 		return s.sendVerifyCode(ctx, user.Email, constants.VerifyPurposeChangeEmailOld, locale)
 	case "new":
-		normalized, err := normalizeEmail(newEmail)
+		normalized, err := normalizeUserSuppliedEmail(newEmail)
 		if err != nil {
 			return err
 		}
@@ -205,7 +208,7 @@ func (s *Service) ChangeEmail(userID uint, newEmail, oldCode, newCode string) (*
 		return nil, err
 	}
 
-	normalized, err := normalizeEmail(newEmail)
+	normalized, err := normalizeUserSuppliedEmail(newEmail)
 	if err != nil {
 		return nil, err
 	}

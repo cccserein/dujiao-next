@@ -108,6 +108,7 @@ func TestUpdateSiteSettingNormalized(t *testing.T) {
 			"site_name": 123,
 			"site_url":  "  https://example.com/path/  ",
 			"site_icon": "  /uploads/site/icon.png  ",
+			"site_logo": "  /uploads/site/logo.png  ",
 		},
 		"contact": map[string]interface{}{
 			"telegram": "  https://t.me/demo  ",
@@ -206,6 +207,21 @@ func TestUpdateSiteSettingNormalized(t *testing.T) {
 	}
 	if brand["site_icon"] != "/uploads/site/icon.png" {
 		t.Fatalf("unexpected brand.site_icon: %v", brand["site_icon"])
+	}
+	if brand["site_logo"] != "/uploads/site/logo.png" {
+		t.Fatalf("unexpected brand.site_logo: %v", brand["site_logo"])
+	}
+
+	config, err := svc.GetConfig(map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("get site config after update failed: %v", err)
+	}
+	storedBrand, ok := config["brand"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("invalid stored brand payload type: %T", config["brand"])
+	}
+	if storedBrand["site_logo"] != "/uploads/site/logo.png" {
+		t.Fatalf("stored brand.site_logo was lost: %v", storedBrand["site_logo"])
 	}
 
 	contact, ok := result["contact"].(map[string]interface{})
@@ -370,6 +386,9 @@ func TestUpdateSiteSettingNormalizedDefaultAbout(t *testing.T) {
 		t.Fatalf("unexpected default brand payload: %+v", brand)
 	}
 	if brand["site_icon"] != "" {
+		t.Fatalf("unexpected default brand payload: %+v", brand)
+	}
+	if brand["site_logo"] != "" {
 		t.Fatalf("unexpected default brand payload: %+v", brand)
 	}
 	scripts, ok := result["scripts"].([]interface{})
@@ -691,5 +710,37 @@ func TestUpdateTelegramAuthSettingNormalized(t *testing.T) {
 	}
 	if result["replay_ttl_seconds"] != 60 {
 		t.Fatalf("unexpected replay_ttl_seconds: %v", result["replay_ttl_seconds"])
+	}
+}
+
+func TestUpdateSiteSettingValidatesContactLinks(t *testing.T) {
+	repo := newMockSettingRepo()
+	svc := NewService(repo)
+
+	cases := []struct {
+		contact map[string]interface{}
+		field   string
+	}{
+		{map[string]interface{}{"whatsapp": "https://example.com/logo.png"}, "contact_whatsapp"},
+		{map[string]interface{}{"telegram": "javascript:alert(1)"}, "contact_telegram"},
+	}
+	for _, tc := range cases {
+		_, err := svc.Update(constants.SettingKeySiteConfig, map[string]interface{}{"contact": tc.contact})
+		var fieldErr *SettingFieldError
+		if !errors.As(err, &fieldErr) || fieldErr.Field != tc.field {
+			t.Fatalf("contact %v: expected field error %s, got %v", tc.contact, tc.field, err)
+		}
+	}
+	if _, ok := repo.store[constants.SettingKeySiteConfig]; ok {
+		t.Fatalf("invalid site config must not be persisted")
+	}
+
+	if _, err := svc.Update(constants.SettingKeySiteConfig, map[string]interface{}{
+		"contact": map[string]interface{}{"telegram": "https://t.me/shop", "whatsapp": "https://wa.me/1234567890"},
+	}); err != nil {
+		t.Fatalf("valid contact links rejected: %v", err)
+	}
+	if _, err := svc.Update(constants.SettingKeySiteConfig, map[string]interface{}{"contact": map[string]interface{}{}}); err != nil {
+		t.Fatalf("empty contact links rejected: %v", err)
 	}
 }

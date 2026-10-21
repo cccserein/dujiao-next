@@ -38,12 +38,21 @@ const (
 	PaymentStatusExpired   = "expired"
 )
 
-// 支付创建时手续费策略常量
+// 支付手续费策略常量。每笔支付在创建时保存快照，后续配置变化不会重解释历史记录。
 const (
 	PaymentFeePolicyNone                    = "none"
 	PaymentFeePolicyMerchantAbsorbed        = "merchant_absorbed"
 	PaymentFeePolicyCustomerSurcharge       = "customer_surcharge"
 	PaymentFeePolicyLegacyCustomerSurcharge = "legacy_customer_surcharge"
+)
+
+// 支付异常标记常量，供后台审计迟到或重复成功的支付。
+const (
+	PaymentExceptionInvalidAmountSnapshot = "invalid_amount_snapshot"
+	PaymentExceptionSupersededSucceeded   = "superseded_payment_succeeded"
+	PaymentExceptionDuplicateSucceeded    = "duplicate_payment_succeeded"
+	PaymentExceptionClosedOrderSucceeded  = "closed_order_payment_succeeded"
+	PaymentExceptionUnderpaidSucceeded    = "underpaid_payment_succeeded"
 )
 
 // 支付提供方常量
@@ -112,22 +121,15 @@ const (
 	PaymentDujiaoPayOrderModeCashier     = "cashier"
 )
 
-// 支付异常原因常量
-const (
-	PaymentExceptionUnderpaidSucceeded    = "underpaid_succeeded"
-	PaymentExceptionDuplicateSucceeded    = "duplicate_succeeded"
-	PaymentExceptionClosedOrderSucceeded  = "closed_order_succeeded"
-	PaymentExceptionInvalidAmountSnapshot = "invalid_amount_snapshot"
-)
-
 // 钱包交易类型常量
 const (
-	WalletTxnTypeRecharge             = "recharge"
-	WalletTxnTypeOrderPay             = "order_pay"
-	WalletTxnTypeOrderRefund          = "order_refund"
-	WalletTxnTypeAdminAdjust          = "admin_adjust"
-	WalletTxnTypeAdminRefund          = "admin_refund"
-	WalletTxnTypeGiftCard             = "gift_card_redeem"
+	WalletTxnTypeRecharge    = "recharge"
+	WalletTxnTypeOrderPay    = "order_pay"
+	WalletTxnTypeOrderRefund = "order_refund"
+	WalletTxnTypeAdminAdjust = "admin_adjust"
+	WalletTxnTypeAdminRefund = "admin_refund"
+	WalletTxnTypeGiftCard    = "gift_card_redeem"
+	// WalletTxnTypeOrderUnderpaidCredit 记录"支付成功但金额不足以履约订单"时转入用户余额的款项。
 	WalletTxnTypeOrderUnderpaidCredit = "order_underpaid_credit"
 )
 
@@ -361,6 +363,13 @@ const (
 	NotificationEventExceptionAlertCheck      = "exception_alert_check"
 )
 
+// 通知中心渠道常量
+const (
+	NotificationChannelEmail    = "email"
+	NotificationChannelTelegram = "telegram"
+	NotificationChannelFeishu   = "feishu"
+)
+
 // 通知中心异常阈值类型常量
 const (
 	NotificationAlertTypeOutOfStockProducts = "out_of_stock_products"
@@ -378,6 +387,7 @@ const (
 	TaskWalletRechargeExpire        = "wallet_recharge:timeout_expire"
 	TaskNotificationDispatch        = "notification:dispatch"
 	TaskAffiliateConfirmCommissions = "affiliate:confirm_commissions"
+	TaskAffiliateOrderPaid          = "affiliate:order_paid"
 	TaskResellerConfirmLedger       = "reseller:confirm_ledger"
 	TaskProcurementSubmit           = "procurement:submit"
 	TaskProcurementPollStatus       = "procurement:poll_status"
@@ -477,11 +487,16 @@ const (
 	SettingKeyWalletConfig        = "wallet_config"
 	SettingFieldWalletOnlyPayment = "wallet_only_payment"
 
+	SettingKeyPaymentConfig                = "payment_config"
+	SettingFieldCustomerFeeEnabled         = "customer_fee_enabled"
+	SettingFieldReuseLegacyOrderFeePayment = "reuse_legacy_order_fee_payment"
+
 	SettingKeyRegistrationConfig            = "registration_config"
 	SettingFieldRegistrationEnabled         = "registration_enabled"
 	SettingFieldEmailVerificationEnabled    = "email_verification_enabled"
 	SettingFieldEmailDomainAllowlistEnabled = "email_domain_allowlist_enabled"
 	SettingFieldAllowedEmailDomains         = "allowed_email_domains"
+	SettingFieldRegistrationInviteOnly      = "invite_only_enabled"
 
 	SettingKeyOrderRiskControlConfig = "order_risk_control_config"
 

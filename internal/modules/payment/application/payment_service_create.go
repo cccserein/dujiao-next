@@ -12,6 +12,7 @@ import (
 	orderapp "github.com/dujiao-next/internal/modules/order/application"
 
 	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
+	settingsapp "github.com/dujiao-next/internal/modules/settings/application"
 
 	"github.com/dujiao-next/internal/constants"
 	walletcontract "github.com/dujiao-next/internal/modules/wallet/contract"
@@ -68,6 +69,10 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 	reusedPending := false
 	orderPaidByWallet := false
 	now := time.Now()
+	feeConfig := settingsapp.DefaultPaymentFeeConfig()
+	if s.settingService != nil {
+		feeConfig = s.settingService.GetPaymentFeeConfig()
+	}
 
 	// 在事务外查询设置，避免 SQLite 单连接池下自锁
 	walletOnly := s.settingService != nil && s.settingService.GetWalletOnlyPayment()
@@ -147,17 +152,6 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 		}
 
 		onlineAmount := normalizeOrderAmount(lockedOrder.TotalAmount.Decimal.Sub(lockedOrder.WalletPaidAmount.Decimal))
-		if channel != nil && onlineAmount.IsPositive() {
-			existing, err := paymentRepo.GetLatestPendingByOrderChannel(lockedOrder.ID, channel.ID, time.Now())
-			if err != nil {
-				return ErrPaymentCreateFailed
-			}
-			if covered, valid := paymentCoveredOrderAmount(existing, lockedOrder.Currency); existing != nil && hasProviderResult(existing) && valid && covered.Equal(onlineAmount) {
-				reusedPending = true
-				payment, order = existing, &lockedOrder
-				return nil
-			}
-		}
 		if onlineAmount.LessThanOrEqual(decimal.Zero) {
 			walletPaidAmount := normalizeOrderAmount(lockedOrder.WalletPaidAmount.Decimal)
 			paidAt := time.Now()
@@ -181,11 +175,18 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			if err := paymentRepo.Create(payment); err != nil {
 				return ErrPaymentCreateFailed
 			}
+			// 余额已覆盖全额，订单遗留的在线链接必须同时作废，避免用户再付一次。
+			if _, err := paymentRepo.SupersedePendingByOrderID(lockedOrder.ID, payment.ID, paidAt); err != nil {
+				return ErrPaymentCreateFailed
+			}
 			if err := s.markOrderPaid(tx, &lockedOrder, paidAt); err != nil {
 				return err
 			}
-			if _, err := paymentRepo.ExpirePendingByOrderIDs([]uint{lockedOrder.ID}, paidAt); err != nil {
-				return ErrPaymentUpdateFailed
+			// 与在线支付回调一致：分销利润与支付在同一事务入账
+			if s.resellerAccounting != nil {
+				if err := s.resellerAccounting.PostOrderProfit(tx.ResellerAccounting(), &lockedOrder, payment); err != nil {
+					return err
+				}
 			}
 			orderPaidByWallet = true
 			order = &lockedOrder
@@ -209,14 +210,27 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			fixedFee = channel.FixedFee.Decimal.Round(2)
 		}
 
-		feeAmount := fixedFee
-		if feeRate.GreaterThan(decimal.Zero) {
-			feeAmount = feeAmount.Add(onlineAmount.Mul(feeRate).Div(decimal.NewFromInt(100))).Round(2)
+		paymentAmount, feeAmount, feePolicy := calculatePaymentAmounts(onlineAmount, feeRate, fixedFee, feeConfig.CustomerFeeEnabled)
+		paymentCurrency := lockedOrder.Currency
+		if shouldUseCNYPaymentCurrency(channel) {
+			paymentCurrency = "CNY"
 		}
-		payableAmount := onlineAmount.Add(feeAmount).Round(2)
-		feePolicy := constants.PaymentFeePolicyNone
-		if feeAmount.IsPositive() {
-			feePolicy = constants.PaymentFeePolicyCustomerSurcharge
+		existing, err := paymentRepo.GetLatestPendingByOrderChannel(lockedOrder.ID, channel.ID, time.Now())
+		if err != nil {
+			return ErrPaymentCreateFailed
+		}
+		covered, validSnapshot := paymentCoveredOrderAmount(existing, lockedOrder.Currency)
+		if existing != nil && hasProviderResult(existing) && existing.Currency == paymentCurrency &&
+			validSnapshot && covered.Equal(onlineAmount) {
+			legacyFeePayment := existing.FeeAmount.Decimal.IsPositive() &&
+				(existing.FeePolicy == "" || existing.FeePolicy == constants.PaymentFeePolicyLegacyCustomerSurcharge)
+			if (legacyFeePayment && feeConfig.ReuseLegacyOrderFeePayment) ||
+				(!legacyFeePayment && existing.Amount.Decimal.Equal(paymentAmount)) {
+				reusedPending = true
+				payment = existing
+				order = &lockedOrder
+				return nil
+			}
 		}
 		payment = &paymentdomain.Payment{
 			OrderID:         lockedOrder.ID,
@@ -224,20 +238,16 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			ProviderType:    channel.ProviderType,
 			ChannelType:     channel.ChannelType,
 			InteractionMode: channel.InteractionMode,
-			Amount:          money.FromDecimal(payableAmount),
+			Amount:          money.FromDecimal(paymentAmount),
 			FeeRate:         money.FromDecimal(feeRate),
 			FixedFee:        money.FromDecimal(fixedFee),
 			FeeAmount:       money.FromDecimal(feeAmount),
 			FeePolicy:       feePolicy,
-			Currency:        lockedOrder.Currency,
+			Currency:        paymentCurrency,
 			Status:          constants.PaymentStatusInitiated,
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		}
-		if shouldUseCNYPaymentCurrency(channel) {
-			payment.Currency = "CNY"
-		}
-
 		if err := paymentRepo.Create(payment); err != nil {
 			return ErrPaymentCreateFailed
 		}
@@ -261,6 +271,9 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 	}
 
 	if reusedPending {
+		if _, err := s.paymentRepo.SupersedePendingByOrderID(order.ID, payment.ID, time.Now()); err != nil {
+			return nil, ErrPaymentCreateFailed
+		}
 		log.Infow("payment_create_reuse_pending",
 			"payment_id", payment.ID,
 			"provider_type", payment.ProviderType,
@@ -339,6 +352,14 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			)
 		}
 		return nil, err
+	}
+	if _, err := s.paymentRepo.SupersedePendingByOrderID(order.ID, payment.ID, time.Now()); err != nil {
+		log.Errorw("payment_create_supersede_previous_failed",
+			"payment_id", payment.ID,
+			"order_id", order.ID,
+			"error", err,
+		)
+		return nil, ErrPaymentCreateFailed
 	}
 
 	log.Infow("payment_create_success",

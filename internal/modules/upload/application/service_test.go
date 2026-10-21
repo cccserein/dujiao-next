@@ -5,7 +5,6 @@ import (
 	"io"
 	"mime/multipart"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/dujiao-next/internal/modules/upload/contract"
@@ -80,18 +79,10 @@ func TestUploadServiceSaveFileSVG(t *testing.T) {
 
 	safeSVG := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="red"/></svg>`
 
-	t.Run("safe SVG upload succeeds", func(t *testing.T) {
+	t.Run("safe SVG upload is rejected because it is same-origin active content", func(t *testing.T) {
 		fh := createMultipartFile(t, "icon.svg", []byte(safeSVG))
-		result, err := svc.SaveFileWithMeta(fh, "common")
-		if err != nil {
-			t.Fatalf("expected success, got error: %v", err)
-		}
-		path := result.URL
-		if filepath.Ext(path) != ".svg" {
-			t.Fatalf("expected .svg extension, got %s", path)
-		}
-		if string(store.data) != safeSVG {
-			t.Fatalf("stored SVG mismatch: %q", store.data)
+		if _, err := svc.SaveFileWithMeta(fh, "common"); err == nil {
+			t.Fatal("SVG upload must be rejected")
 		}
 	})
 
@@ -102,9 +93,6 @@ func TestUploadServiceSaveFileSVG(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for SVG with script tag")
 		}
-		if !strings.Contains(err.Error(), "<script>") {
-			t.Fatalf("unexpected error message: %v", err)
-		}
 	})
 
 	t.Run("SVG with event handler is rejected", func(t *testing.T) {
@@ -113,9 +101,6 @@ func TestUploadServiceSaveFileSVG(t *testing.T) {
 		_, err := svc.SaveFileWithMeta(fh, "common")
 		if err == nil {
 			t.Fatal("expected error for SVG with event handler")
-		}
-		if !strings.Contains(err.Error(), "onload") {
-			t.Fatalf("unexpected error message: %v", err)
 		}
 	})
 
@@ -140,13 +125,22 @@ func TestUploadServiceSaveFileSVG(t *testing.T) {
 	t.Run("SVG with XML declaration", func(t *testing.T) {
 		xmlSVG := `<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="blue"/></svg>`
 		fh := createMultipartFile(t, "xml.svg", []byte(xmlSVG))
-		result, err := svc.SaveFileWithMeta(fh, "common")
-		if err != nil {
-			t.Fatalf("expected success, got error: %v", err)
+		if _, err := svc.SaveFileWithMeta(fh, "common"); err == nil {
+			t.Fatal("SVG upload must be rejected")
 		}
-		path := result.URL
-		if filepath.Ext(path) != ".svg" {
-			t.Fatalf("expected .svg extension, got %s", path)
+	})
+
+	t.Run("telegram scene rejects HTML document", func(t *testing.T) {
+		fh := createMultipartFile(t, "page.html", []byte("<html><script>alert(1)</script></html>"))
+		if _, err := svc.SaveFileWithMeta(fh, "telegram"); err == nil {
+			t.Fatal("HTML upload must be rejected for every scene")
+		}
+	})
+
+	t.Run("disguised SVG is rejected", func(t *testing.T) {
+		fh := createMultipartFile(t, "page.txt", []byte(safeSVG))
+		if _, err := svc.SaveFileWithMeta(fh, "telegram"); err == nil {
+			t.Fatal("SVG content must be rejected regardless of extension")
 		}
 	})
 }
@@ -185,6 +179,16 @@ func TestValidateSVGSafety(t *testing.T) {
 		{"javascript href", `<svg><a href="javascript:void(0)"></a></svg>`, true},
 		{"data uri html", `<svg><image href="data:text/html,<h1>hi</h1>"/></svg>`, true},
 		{"foreignObject", `<svg><foreignObject></foreignObject></svg>`, true},
+		{"onload tab before equals", "<svg xmlns=\"http://www.w3.org/2000/svg\" onload\t=\"alert(1)\"></svg>", true},
+		{"onload newline before equals", "<svg onload\n=\"alert(1)\"></svg>", true},
+		{"onload double space", `<svg onload  ="alert(1)"></svg>`, true},
+		{"unlisted event attr onbegin", `<svg><set attributeName="x" onbegin="alert(1)"/></svg>`, true},
+		{"entity encoded javascript", `<svg><a href="&#106;avascript:alert(1)"></a></svg>`, true},
+		{"xlink href javascript", `<svg xmlns:xlink="http://www.w3.org/1999/xlink"><a xlink:href="javascript:alert(1)"></a></svg>`, true},
+		{"xml-stylesheet pi", `<?xml-stylesheet href="http://evil/x.css"?><svg></svg>`, true},
+		{"entity declaration", `<!DOCTYPE svg [<!ENTITY x "y">]><svg>&x;</svg>`, true},
+		{"malformed xml", `<svg onload="alert(1)"`, true},
+		{"safe with doctype and style", `<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg xmlns="http://www.w3.org/2000/svg"><style>.a{fill:red}</style><rect class="a" width="10" height="10"/></svg>`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

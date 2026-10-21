@@ -9,6 +9,7 @@ import (
 	. "github.com/dujiao-next/internal/modules/fulfillment/application"
 	fulfillmentdomain "github.com/dujiao-next/internal/modules/fulfillment/domain"
 	fulfillmentgormstore "github.com/dujiao-next/internal/modules/fulfillment/infrastructure/gormstore"
+	ordercontract "github.com/dujiao-next/internal/modules/order/contract"
 	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
 	ordergormstore "github.com/dujiao-next/internal/modules/order/infrastructure/gormstore"
 
@@ -148,5 +149,114 @@ func TestCreateAutoFulfillmentRespectsSKUBoundary(t *testing.T) {
 	}
 	if orderAfter.Status != constants.OrderStatusCompleted {
 		t.Fatalf("order status want completed got %s", orderAfter.Status)
+	}
+}
+
+type refundBeforeFulfillmentTransaction struct {
+	ordercontract.Store
+	db      *gorm.DB
+	orderID uint
+	status  string
+}
+
+func (store refundBeforeFulfillmentTransaction) WithinTransaction(fn func(ordercontract.Transaction) error) error {
+	status := store.status
+	if status == "" {
+		status = constants.OrderStatusRefunded
+	}
+	if err := store.db.Model(&orderdomain.Order{}).Where("id = ?", store.orderID).
+		Update("status", status).Error; err != nil {
+		return err
+	}
+	return store.Store.WithinTransaction(fn)
+}
+
+func TestCreateAutoFulfillmentRechecksPaidStatusInsideTransaction(t *testing.T) {
+	for _, status := range []string{
+		constants.OrderStatusRefunded,
+		constants.OrderStatusPartiallyRefunded,
+		constants.OrderStatusCanceled,
+	} {
+		t.Run(status, func(t *testing.T) {
+			db := setupFulfillmentServiceTestDB(t)
+			now := time.Now()
+			order := &orderdomain.Order{
+				OrderNo: "SANDBOX-REFUND-RACE", UserID: 1, Status: constants.OrderStatusPaid,
+				Currency: "CNY", TotalAmount: money.FromDecimal(decimal.NewFromInt(10)),
+				CreatedAt: now, UpdatedAt: now,
+			}
+			if err := db.Create(order).Error; err != nil {
+				t.Fatalf("create paid order: %v", err)
+			}
+			if err := db.Create(&orderdomain.OrderItem{
+				OrderID: order.ID, ProductID: 100, SKUID: 1001, Quantity: 1,
+				TitleJSON:       jsonmap.JSON{"zh-CN": "fake product"},
+				FulfillmentType: constants.FulfillmentTypeAuto,
+				UnitPrice:       money.FromDecimal(decimal.NewFromInt(10)),
+				TotalPrice:      money.FromDecimal(decimal.NewFromInt(10)),
+			}).Error; err != nil {
+				t.Fatalf("create fake order item: %v", err)
+			}
+			secret := &cardsecretdomain.Secret{
+				ProductID: 100, SKUID: 1001, Secret: "SANDBOX-CARD",
+				Status: cardsecretdomain.StatusAvailable,
+			}
+			if err := db.Create(secret).Error; err != nil {
+				t.Fatalf("create fake card secret: %v", err)
+			}
+			store := refundBeforeFulfillmentTransaction{
+				Store: ordergormstore.New(db, "test-guest-credential-secret-with-32-bytes"),
+				db:    db, orderID: order.ID, status: status,
+			}
+			svc := New(Options{OrderStore: store, FulfillmentStore: fulfillmentgormstore.New(db)})
+			if fulfillment, err := svc.CreateAuto(order.ID); err != ErrOrderStatusInvalid || fulfillment != nil {
+				t.Fatalf("changed-status order must not receive a fake card: fulfillment=%#v err=%v", fulfillment, err)
+			}
+			var storedSecret cardsecretdomain.Secret
+			if err := db.First(&storedSecret, secret.ID).Error; err != nil {
+				t.Fatalf("reload fake card: %v", err)
+			}
+			if storedSecret.Status != cardsecretdomain.StatusAvailable {
+				t.Fatalf("changed-status order consumed fake card: %s", storedSecret.Status)
+			}
+		})
+	}
+}
+
+func TestCreateManualFulfillmentRechecksStatusInsideTransaction(t *testing.T) {
+	for _, status := range []string{
+		constants.OrderStatusRefunded,
+		constants.OrderStatusPartiallyRefunded,
+		constants.OrderStatusCanceled,
+	} {
+		t.Run(status, func(t *testing.T) {
+			db := setupFulfillmentServiceTestDB(t)
+			order := &orderdomain.Order{
+				OrderNo: "SANDBOX-MANUAL-STATUS-RACE", UserID: 1,
+				Status: constants.OrderStatusPaid, Currency: "CNY",
+				TotalAmount: money.FromDecimal(decimal.NewFromInt(10)),
+			}
+			if err := db.Create(order).Error; err != nil {
+				t.Fatalf("create paid order: %v", err)
+			}
+			store := refundBeforeFulfillmentTransaction{
+				Store: ordergormstore.New(db, "test-guest-credential-secret-with-32-bytes"),
+				db:    db, orderID: order.ID, status: status,
+			}
+			svc := New(Options{OrderStore: store, FulfillmentStore: fulfillmentgormstore.New(db)})
+			got, err := svc.CreateManual(CreateManualInput{
+				OrderID: order.ID, AdminID: 7, Payload: "SANDBOX-MANUAL-SECRET",
+			})
+			if err != ErrOrderStatusInvalid || got != nil {
+				t.Fatalf("changed-status order accepted manual secret: fulfillment=%#v err=%v", got, err)
+			}
+			var count int64
+			if err := db.Model(&fulfillmentdomain.Fulfillment{}).Where("order_id = ?", order.ID).Count(&count).Error; err != nil {
+				t.Fatalf("count fulfillment rows: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("changed-status order persisted %d fulfillment rows", count)
+			}
+		})
 	}
 }

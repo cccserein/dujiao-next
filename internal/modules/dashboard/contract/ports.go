@@ -63,12 +63,16 @@ type PaymentTrendRow struct {
 type ProfitOverviewRow struct {
 	TotalRevenue float64
 	TotalCost    float64
+	RefundedCost float64
+	PaymentFee   float64
 }
 
 type ProfitTrendRow struct {
-	Day     string
-	Revenue float64
-	Cost    float64
+	Day          string
+	Revenue      float64
+	Cost         float64
+	RefundedCost float64
+	PaymentFee   float64
 }
 
 type StockStatsRow struct {

@@ -13,6 +13,7 @@ import (
 	"github.com/dujiao-next/internal/persistence/gormutil"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ProductStore 是 Catalog Product 端口的 GORM 实现。
@@ -65,6 +66,10 @@ func (r *ProductStore) List(filter productcontract.ListFilter) ([]productdomain.
 	} else if filter.CategoryID != "" {
 		query = query.Where("category_id = ?", filter.CategoryID)
 	}
+	// 三态上架筛选：OnlyActive 已强制 is_active = true，此时不再叠加
+	if filter.IsActive != nil && !filter.OnlyActive {
+		query = query.Where("products.is_active = ?", *filter.IsActive)
+	}
 	if len(filter.ExcludeProductIDs) > 0 {
 		query = query.Where("products.id NOT IN ?", filter.ExcludeProductIDs)
 	}
@@ -89,7 +94,13 @@ func (r *ProductStore) List(filter productcontract.ListFilter) ([]productdomain.
 	}
 
 	if filter.UpdatedAfter != nil {
-		query = query.Where("updated_at > ?", *filter.UpdatedAfter)
+		// 库存变化落在 SKU（人工库存预占/售出）与卡密行上，不会改动商品行本身；
+		// 下游增量同步依赖此过滤，需一并纳入，否则库存变化要等每日全量同步才可见。
+		after := *filter.UpdatedAfter
+		query = query.Where("(products.updated_at > ? OR "+
+			"EXISTS (SELECT 1 FROM product_skus ps WHERE ps.product_id = products.id AND ps.updated_at > ?) OR "+
+			"EXISTS (SELECT 1 FROM card_secrets cs WHERE cs.product_id = products.id AND cs.updated_at > ?))",
+			after, after, after)
 	}
 
 	stockStatus := strings.ToLower(strings.TrimSpace(filter.StockStatus))
@@ -204,13 +215,18 @@ func (r *ProductStore) GetBySlug(slug string, onlyActive bool) (*productdomain.P
 
 // GetByID 根据 ID 获取商品
 func (r *ProductStore) GetByID(id string) (*productdomain.Product, error) {
+	pk, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return nil, nil
+	}
 	var product productdomain.Product
 	if err := r.db.Preload("Category", "deleted_at IS NULL").
 		Preload("SKUs", func(db *gorm.DB) *gorm.DB {
 			return db.Where("deleted_at IS NULL AND is_active = ?", true).Order("sort_order DESC, id ASC")
 		}).
 		Where("products.deleted_at IS NULL").
-		First(&product, id).Error; err != nil {
+		Where("products.id = ?", pk).
+		First(&product).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -221,13 +237,18 @@ func (r *ProductStore) GetByID(id string) (*productdomain.Product, error) {
 
 // GetAdminByID 根据 ID 获取后台商品详情，包含全部 SKU
 func (r *ProductStore) GetAdminByID(id string) (*productdomain.Product, error) {
+	pk, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return nil, nil
+	}
 	var product productdomain.Product
 	if err := r.db.Preload("Category", "deleted_at IS NULL").
 		Preload("SKUs", func(db *gorm.DB) *gorm.DB {
 			return db.Where("deleted_at IS NULL").Order("sort_order DESC, id ASC")
 		}).
 		Where("products.deleted_at IS NULL").
-		First(&product, id).Error; err != nil {
+		Where("products.id = ?", pk).
+		First(&product).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -253,9 +274,13 @@ func (r *ProductStore) Create(product *productdomain.Product) error {
 	return r.db.Create(product).Error
 }
 
-// Update 更新商品
+// Update 更新商品自身字段。
+//
+// 不级联保存关联：调用方拿到的 product 往往带着读取时预加载的 Category/SKUs 快照，
+// 而 SKU 删除是硬删除，级联 upsert 会把已删除的规格按原 ID 重新插回（issue #344）。
+// SKU 一律由 SKURepository 独占管理。
 func (r *ProductStore) Update(product *productdomain.Product) error {
-	return r.db.Save(product).Error
+	return r.db.Omit(clause.Associations).Save(product).Error
 }
 
 // QuickUpdate 快速更新商品指定字段
@@ -268,10 +293,10 @@ func (r *ProductStore) Delete(id string) error {
 	return r.db.Model(&productdomain.Product{}).Where("id = ? AND deleted_at IS NULL", id).Update("deleted_at", time.Now()).Error
 }
 
-// CountBySlug 统计 slug 数量
+// CountBySlug 统计 slug 数量（含软删除记录：products.slug 唯一索引同样约束已删除商品）
 func (r *ProductStore) CountBySlug(slug string, excludeID *string) (int64, error) {
 	var count int64
-	query := r.db.Model(&productdomain.Product{}).Where("deleted_at IS NULL AND slug = ?", slug)
+	query := r.db.Model(&productdomain.Product{}).Where("slug = ?", slug)
 	if excludeID != nil {
 		query = query.Where("id != ?", *excludeID)
 	}

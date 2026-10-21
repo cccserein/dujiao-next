@@ -868,7 +868,7 @@ onMounted(async () => {
       </div>
 
       <div class="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-4">
-        <div class="space-y-3">
+        <div class="min-w-0 space-y-3">
           <Input v-model="adminKeyword" :placeholder="text.adminSearchPlaceholder" class="h-9" />
           <div class="rounded-lg border border-border overflow-x-auto">
             <Table class="min-w-[900px]">
@@ -1005,7 +1005,7 @@ onMounted(async () => {
         </div>
       </section>
 
-      <section class="rounded-xl border border-border bg-card p-5 space-y-4 xl:col-span-2">
+      <section class="min-w-0 rounded-xl border border-border bg-card p-5 space-y-4 xl:col-span-2">
         <div class="flex items-center justify-between">
           <h2 class="text-base font-medium">{{ text.policiesTitle }}</h2>
           <span class="text-xs text-muted-foreground" v-if="selectedRole">{{ stripRolePrefix(selectedRole) }}</span>
@@ -1143,7 +1143,7 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="space-y-3">
+        <div class="min-w-0 space-y-3">
           <div class="text-sm text-muted-foreground">{{ text.rolesLabel }}</div>
           <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
             <Label

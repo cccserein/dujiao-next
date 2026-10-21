@@ -8,6 +8,7 @@ import IdCell from '@/components/IdCell.vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogScrollContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import {
@@ -58,6 +59,7 @@ const manualRefundSuccess = ref('')
 const manualRefundForm = reactive({
   amount: '',
   reason: '',
+  paymentFeeRefunded: true,
 })
 
 
@@ -183,9 +185,19 @@ const itemProfit = (order: AdminOrder | null, item: AdminOrderItem) => {
   return Number(profit.toFixed(2))
 }
 
+const orderPaymentFee = (order: AdminOrder | null) => {
+  if (!order?.payments?.length) return 0
+  const fee = order.payments.reduce((sum, payment) => {
+    if (payment.status !== 'success' || payment.fee_policy !== 'merchant_absorbed') return sum
+    return sum + Math.max(parseMoneyValue(payment.fee_amount), 0)
+  }, 0)
+  return Number(fee.toFixed(2))
+}
+
 const orderProfit = (order: AdminOrder | null) => {
   if (!order?.items?.length) return 0
-  return Number(order.items.reduce((sum, item) => sum + itemProfit(order, item), 0).toFixed(2))
+  const itemTotal = order.items.reduce((sum, item) => sum + itemProfit(order, item), 0)
+  return Number((itemTotal - orderPaymentFee(order)).toFixed(2))
 }
 
 const hasWalletPayment = (order: AdminOrder) => hasPositiveAmount(order?.wallet_paid_amount)
@@ -497,6 +509,7 @@ const resetRefundForm = () => {
 const resetManualRefundForm = () => {
   manualRefundForm.amount = ''
   manualRefundForm.reason = ''
+  manualRefundForm.paymentFeeRefunded = true
   manualRefundError.value = ''
   manualRefundSuccess.value = ''
 }
@@ -613,10 +626,12 @@ const submitManualRefund = async () => {
     await adminAPI.manualRefundOrder(Number(selectedOrder.value.id), {
       amount,
       remark: manualRefundForm.reason.trim() || undefined,
+      payment_fee_refunded: manualRefundForm.paymentFeeRefunded,
     })
     manualRefundSuccess.value = t('admin.orders.manualRefundSuccess')
     manualRefundForm.amount = ''
     manualRefundForm.reason = ''
+    manualRefundForm.paymentFeeRefunded = true
     await fetchOrderDetail(Number(selectedOrder.value.id))
     emit('refresh')
   } catch (err: any) {
@@ -912,6 +927,9 @@ watch(
               <div v-if="hasPositiveAmount(selectedOrder.refunded_amount)" class="rounded-lg border border-blue-200 bg-blue-50/60 px-4 py-2 text-sm font-semibold text-blue-700">
                 {{ t('admin.orders.itemRefund') }}：{{ formatMoney(selectedOrder.refunded_amount, selectedOrder.currency) }}
               </div>
+              <div v-if="hasPositiveAmount(orderPaymentFee(selectedOrder))" class="rounded-lg border border-amber-200 bg-amber-50/60 px-4 py-2 text-sm font-semibold text-amber-700">
+                {{ t('admin.payments.table.feeAmount') }}：{{ formatMoney(orderPaymentFee(selectedOrder).toFixed(2), selectedOrder.currency) }}
+              </div>
               <div class="rounded-lg border border-emerald-200 bg-emerald-50/50 px-4 py-2 text-sm font-semibold text-emerald-700">
                 {{ t('admin.orders.orderProfit') }}：{{ formatMoney(orderProfit(selectedOrder).toFixed(2), selectedOrder.currency) }}
               </div>
@@ -1195,28 +1213,41 @@ watch(
             </form>
             <form
               v-else
-              class="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]"
+              class="space-y-3"
               @submit.prevent="submitManualRefund"
             >
-              <Input
-                class="min-w-0"
-                v-model="manualRefundForm.amount"
-                :placeholder="t('admin.orders.refundAmountPlaceholder')"
-                :disabled="manualRefundSubmitting || !canManualRefund(selectedOrder)"
-              />
-              <Input
-                class="min-w-0"
-                v-model="manualRefundForm.reason"
-                :placeholder="t('admin.orders.manualRefundReasonPlaceholder')"
-                :disabled="manualRefundSubmitting || !canManualRefund(selectedOrder)"
-              />
-              <Button
-                class="w-full md:w-auto"
-                type="submit"
-                :disabled="manualRefundSubmitting || !canManualRefund(selectedOrder)"
-              >
-                {{ manualRefundSubmitting ? t('admin.orders.refunding') : t('admin.orders.manualRefundSubmit') }}
-              </Button>
+              <div class="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
+                <Input
+                  class="min-w-0"
+                  v-model="manualRefundForm.amount"
+                  :placeholder="t('admin.orders.refundAmountPlaceholder')"
+                  :disabled="manualRefundSubmitting || !canManualRefund(selectedOrder)"
+                />
+                <Input
+                  class="min-w-0"
+                  v-model="manualRefundForm.reason"
+                  :placeholder="t('admin.orders.manualRefundReasonPlaceholder')"
+                  :disabled="manualRefundSubmitting || !canManualRefund(selectedOrder)"
+                />
+                <Button
+                  class="w-full md:w-auto"
+                  type="submit"
+                  :disabled="manualRefundSubmitting || !canManualRefund(selectedOrder)"
+                >
+                  {{ manualRefundSubmitting ? t('admin.orders.refunding') : t('admin.orders.manualRefundSubmit') }}
+                </Button>
+              </div>
+              <label class="flex cursor-pointer items-start gap-2 rounded-lg border border-border bg-background px-3 py-2">
+                <Checkbox
+                  v-model="manualRefundForm.paymentFeeRefunded"
+                  class="mt-0.5"
+                  :disabled="manualRefundSubmitting || !canManualRefund(selectedOrder)"
+                />
+                <span class="space-y-0.5">
+                  <span class="block text-sm font-medium text-foreground">{{ t('admin.orders.paymentFeeRefunded') }}</span>
+                  <span class="block text-xs text-muted-foreground">{{ t('admin.orders.paymentFeeRefundedHint') }}</span>
+                </span>
+              </label>
             </form>
             <div
               v-if="refundTab === 'wallet' && canSelectWalletRefundTab(selectedOrder) && !canRefundToWallet(selectedOrder)"

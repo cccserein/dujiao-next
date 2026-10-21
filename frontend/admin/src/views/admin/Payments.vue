@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { onMounted, reactive, ref, watch, computed } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -35,6 +35,7 @@ const filters = reactive({
   userId: '',
   orderId: '',
   channelId: '',
+  channelType: '__all__',
   providerType: '__all__',
   createdFrom: '',
   createdTo: '',
@@ -50,6 +51,62 @@ const detailPayment = ref<AdminPayment | null>(null)
 const exporting = ref(false)
 const exportError = ref('')
 
+// 动态获取的筛选选项：channelType 按 providerType 联动
+const rawChannels = ref<Array<{ provider_type: string; channel_type: string }>>([])
+const availableProviderTypes = ref<Array<{ value: string; label: string }>>([])
+
+const fetchFilterOptions = async () => {
+  try {
+    const response = await adminAPI.getPaymentChannels({ page: 1, page_size: 200 })
+    const channels = response.data.data || []
+    rawChannels.value = channels.map((channel: any) => ({
+      provider_type: channel.provider_type,
+      channel_type: channel.channel_type,
+    }))
+
+    const providerTypeSet = new Set<string>()
+    channels.forEach((channel: any) => {
+      if (channel.provider_type) providerTypeSet.add(channel.provider_type)
+    })
+    // 钱包余额不在 channel 配置里，单独补充
+    providerTypeSet.add('wallet')
+
+    availableProviderTypes.value = Array.from(providerTypeSet)
+      .sort()
+      .map(type => ({
+        value: type,
+        label: providerTypeLabel(type)
+      }))
+  } catch (error) {
+    console.error('Failed to fetch filter options:', error)
+  }
+}
+
+const availableChannelTypes = computed(() => {
+  const selectedProvider = normalizeFilterValue(filters.providerType)
+  const channelTypeSet = new Set<string>()
+
+  rawChannels.value.forEach((channel) => {
+    if (!channel.channel_type) return
+    if (selectedProvider && channel.provider_type !== selectedProvider) return
+    channelTypeSet.add(channel.channel_type)
+  })
+
+  // wallet 特殊处理：钱包余额不在 channel 配置里
+  if (!selectedProvider || selectedProvider === 'wallet') {
+    channelTypeSet.add('balance')
+  }
+
+  return Array.from(channelTypeSet)
+    .sort()
+    .map(type => ({ value: type, label: channelTypeLabel(type) }))
+})
+
+const handleProviderTypeChange = () => {
+  filters.channelType = '__all__'
+  handleSearch()
+}
+
 const fetchPayments = async (page = 1, options: ListFetchOptions = {}) => {
   if (!options.preserveRows) loading.value = true
   try {
@@ -61,6 +118,7 @@ const fetchPayments = async (page = 1, options: ListFetchOptions = {}) => {
       order_id: filters.orderId || undefined,
       channel_id: filters.channelId || undefined,
       provider_type: normalizeFilterValue(filters.providerType) || undefined,
+      channel_type: normalizeFilterValue(filters.channelType) || undefined,
       created_from: toRFC3339(filters.createdFrom),
       created_to: toRFC3339(filters.createdTo),
     })
@@ -108,6 +166,7 @@ const handleExport = async () => {
       order_id: filters.orderId || undefined,
       channel_id: filters.channelId || undefined,
       provider_type: normalizeFilterValue(filters.providerType) || undefined,
+      channel_type: normalizeFilterValue(filters.channelType) || undefined,
       created_from: toRFC3339(filters.createdFrom),
       created_to: toRFC3339(filters.createdTo),
       status: normalizeFilterValue(filters.status) || undefined,
@@ -158,6 +217,20 @@ const closeDetail = () => {
 const statusClass = (status: string) => paymentStatusClass(status)
 
 const statusLabel = (status: string) => paymentStatusLabel(t, status)
+
+const feePolicyLabel = (policy?: string) => {
+  if (!policy) return '-'
+  const key = `admin.payments.feePolicies.${policy}`
+  const translated = t(key)
+  return translated === key ? policy : translated
+}
+
+const exceptionLabel = (code?: string) => {
+  if (!code) return '-'
+  const key = `admin.payments.exceptions.${code}`
+  const translated = t(key)
+  return translated === key ? code : translated
+}
 
 const providerTypeLabel = (value?: string) => {
   const map: Record<string, string> = {
@@ -255,6 +328,7 @@ const formatPayload = (payload: unknown) => {
 }
 
 onMounted(() => {
+  fetchFilterOptions()
   if (route.query.user_id) {
     filters.userId = String(route.query.user_id || '')
   }
@@ -305,17 +379,28 @@ watch(
           <Input v-model="filters.channelId" :placeholder="t('admin.payments.filterChannelId')" @update:modelValue="debouncedSearch" />
         </div>
         <div class="w-full md:w-40">
-          <Select v-model="filters.providerType" @update:modelValue="handleSearch">
+          <Select v-model="filters.providerType" @update:modelValue="handleProviderTypeChange">
             <SelectTrigger class="h-9 w-full">
               <SelectValue :placeholder="t('admin.payments.filterProviderAll')" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="__all__">{{ t('admin.payments.filterProviderAll') }}</SelectItem>
-              <SelectItem value="wallet">{{ t('admin.paymentChannels.providerTypes.wallet') }}</SelectItem>
-              <SelectItem value="official">{{ t('admin.paymentChannels.providerTypes.official') }}</SelectItem>
-              <SelectItem value="epay">{{ t('admin.paymentChannels.providerTypes.epay') }}</SelectItem>
-              <SelectItem value="epusdt">{{ t('admin.paymentChannels.providerTypes.epusdt') }}</SelectItem>
-              <SelectItem value="tokenpay">{{ t('admin.paymentChannels.providerTypes.tokenpay') }}</SelectItem>
+              <SelectItem v-for="opt in availableProviderTypes" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div class="w-full md:w-40">
+          <Select v-model="filters.channelType" @update:modelValue="handleSearch">
+            <SelectTrigger class="h-9 w-full">
+              <SelectValue placeholder="全部支付方式" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">全部支付方式</SelectItem>
+              <SelectItem v-for="opt in availableChannelTypes" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -557,6 +642,18 @@ watch(
                 <CardContent class="p-4">
                   <div class="text-xs text-muted-foreground mb-2">{{ t('admin.payments.detailFeeAmount') }}</div>
                   <div class="text-foreground font-mono text-sm">{{ formatMoney(detailPayment.fee_amount, detailPayment.currency) }}</div>
+                </CardContent>
+              </Card>
+              <Card class="rounded-lg border-border bg-background shadow-none">
+                <CardContent class="p-4">
+                  <div class="text-xs text-muted-foreground mb-2">{{ t('admin.payments.detailFeePolicy') }}</div>
+                  <div class="text-foreground text-sm">{{ feePolicyLabel(detailPayment.fee_policy) }}</div>
+                </CardContent>
+              </Card>
+              <Card v-if="detailPayment.exception_code" class="rounded-lg border-warning/40 bg-warning/5 shadow-none">
+                <CardContent class="p-4">
+                  <div class="text-xs text-warning mb-2">{{ t('admin.payments.detailException') }}</div>
+                  <div class="text-warning text-sm">{{ exceptionLabel(detailPayment.exception_code) }}</div>
                 </CardContent>
               </Card>
               <Card class="rounded-lg border-border bg-background shadow-none">

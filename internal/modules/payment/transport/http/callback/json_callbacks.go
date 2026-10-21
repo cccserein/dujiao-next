@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	ginutil "github.com/dujiao-next/internal/platform/http/ginutil"
@@ -37,46 +36,24 @@ type okpayProbe struct {
 
 func parseOkpayProbe(body []byte) (okpayProbe, error) {
 	raw := strings.TrimSpace(string(body))
-	if raw == "" {
+	if raw == "" || !strings.HasPrefix(raw, "{") {
 		return okpayProbe{}, fmt.Errorf("empty callback")
 	}
-	if strings.HasPrefix(raw, "{") {
-		var payload struct {
-			Sign         string `json:"sign"`
-			FlatOrderID  string `json:"data[order_id]"`
-			FlatUniqueID string `json:"data[unique_id]"`
-			Data         struct {
-				OrderID  string `json:"order_id"`
-				UniqueID string `json:"unique_id"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(body, &payload); err != nil {
-			return okpayProbe{}, err
-		}
-		return okpayProbe{
-			Sign:     strings.TrimSpace(payload.Sign),
-			OrderID:  firstNonEmpty(payload.FlatOrderID, payload.Data.OrderID),
-			UniqueID: firstNonEmpty(payload.FlatUniqueID, payload.Data.UniqueID),
-		}, nil
+	var payload struct {
+		Sign string `json:"sign"`
+		Data struct {
+			OrderID  string `json:"order_id"`
+			UniqueID string `json:"unique_id"`
+		} `json:"data"`
 	}
-	values, err := url.ParseQuery(raw)
-	if err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return okpayProbe{}, err
 	}
 	return okpayProbe{
-		Sign:     strings.TrimSpace(values.Get("sign")),
-		OrderID:  strings.TrimSpace(values.Get("data[order_id]")),
-		UniqueID: strings.TrimSpace(values.Get("data[unique_id]")),
+		Sign:     strings.TrimSpace(payload.Sign),
+		OrderID:  strings.TrimSpace(payload.Data.OrderID),
+		UniqueID: strings.TrimSpace(payload.Data.UniqueID),
 	}, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 func (h *Handler) handleOkpayCallback(c *gin.Context) bool {

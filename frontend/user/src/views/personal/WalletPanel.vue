@@ -142,6 +142,7 @@ const mapChannel = (channel: any) => ({
   id: Number(channel.id),
   name: String(channel.name || channel.channel_type || channel.id),
   channel_type: String(channel.channel_type || ''),
+  fee_policy: String(channel.fee_policy || ''),
   fee_rate: String(channel.fee_rate ?? '0'),
   fixed_fee: String(channel.fixed_fee ?? '0'),
   min_amount: String(channel.min_amount ?? '0'),
@@ -270,7 +271,6 @@ const selectedChannelFeeAmountDisplay = computed(() => {
   const variableFeeCents = calculateFeeCents(amountCents, rate) || 0
   return formatMoney(centsToAmount(variableFeeCents + fixedFeeCents), selectedChannelCurrency.value)
 })
-
 const balanceDisplay = computed(() => formatMoney(wallet.value?.balance, String(appStore.config?.currency || 'CNY')))
 
 const loadWallet = async () => {

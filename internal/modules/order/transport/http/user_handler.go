@@ -84,12 +84,7 @@ func NewUserHandler(orders UserOrderQuery, payments PaymentChannelPolicy, refund
 }
 
 func tenantFromRequest(c *gin.Context) reseller.TenantContext {
-	if c != nil && c.Request != nil {
-		if tenant, ok := reseller.TenantFromContext(c.Request.Context()); ok {
-			return tenant
-		}
-	}
-	return reseller.MainTenantContext("")
+	return reseller.TenantOrMain(c.Request.Context())
 }
 
 // ListOrders 获取订单列表
@@ -410,6 +405,10 @@ func enrichOrderWithRefundRecords(refunds RefundRecordDirectory, order *orderdom
 }
 
 func respondFulfillmentDownload(c *gin.Context, order *orderdomain.Order) {
+	if !order.CanReadFulfillment() {
+		ginutil.RespondError(c, response.CodeNotFound, "error.fulfillment_not_found", nil)
+		return
+	}
 	payload := collectFulfillmentPayload(order)
 	if payload == "" {
 		ginutil.RespondError(c, response.CodeNotFound, "error.fulfillment_not_found", nil)
@@ -418,6 +417,7 @@ func respondFulfillmentDownload(c *gin.Context, order *orderdomain.Order) {
 	filename := "fulfillment-" + order.OrderNo + ".txt"
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	c.Header("Cache-Control", "no-store")
 	c.Data(200, "text/plain; charset=utf-8", []byte(payload))
 }
 
@@ -427,7 +427,7 @@ func collectFulfillmentPayload(order *orderdomain.Order) string {
 	}
 	var parts []string
 	for _, child := range order.Children {
-		if child.Fulfillment != nil && child.Fulfillment.Payload != "" {
+		if child.CanReadFulfillment() && child.Fulfillment != nil && child.Fulfillment.Payload != "" {
 			parts = append(parts, child.Fulfillment.Payload)
 		}
 	}

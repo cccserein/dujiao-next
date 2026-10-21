@@ -3,6 +3,7 @@ package settingsapp
 import (
 	"encoding/json"
 	"errors"
+	settingsvalue "github.com/dujiao-next/internal/modules/settings/schema/value"
 	"net/mail"
 	"strings"
 	"time"
@@ -51,6 +52,31 @@ type SiteBrand struct {
 type RegistrationEmailDomainPolicy struct {
 	Enabled        bool
 	AllowedDomains []string
+}
+
+// PaymentFeeConfig 控制新支付的手续费承担方式，以及旧版加收链接的过渡策略。
+// 配置只影响后续创建/选择支付，不会重写单笔支付已经保存的 FeePolicy 快照。
+type PaymentFeeConfig struct {
+	CustomerFeeEnabled         bool `json:"customer_fee_enabled"`
+	ReuseLegacyOrderFeePayment bool `json:"reuse_legacy_order_fee_payment"`
+}
+
+// DefaultPaymentFeeConfig 默认遵循文档语义：手续费由商户承担，旧加收链接由新链接替换。
+func DefaultPaymentFeeConfig() PaymentFeeConfig {
+	return PaymentFeeConfig{}
+}
+
+// NormalizePaymentFeeConfig 将支付手续费配置限制在明确的布尔开关内。
+func NormalizePaymentFeeConfig(value jsonmap.JSON) jsonmap.JSON {
+	config := DefaultPaymentFeeConfig()
+	if value != nil {
+		config.CustomerFeeEnabled = settingsvalue.ParseBool(value[constants.SettingFieldCustomerFeeEnabled])
+		config.ReuseLegacyOrderFeePayment = settingsvalue.ParseBool(value[constants.SettingFieldReuseLegacyOrderFeePayment])
+	}
+	return jsonmap.JSON{
+		constants.SettingFieldCustomerFeeEnabled:         config.CustomerFeeEnabled,
+		constants.SettingFieldReuseLegacyOrderFeePayment: config.ReuseLegacyOrderFeePayment,
+	}
 }
 
 // GetConfig 获取站点配置（合并默认值）
@@ -250,7 +276,19 @@ func (s *Service) GetRegistrationEnabled(defaultValue bool) (bool, error) {
 	if !ok {
 		return defaultValue, nil
 	}
-	return parseSettingBool(raw), nil
+	return settingsvalue.ParseBool(raw), nil
+}
+
+// GetRegistrationInviteOnly 获取"仅凭邀请码注册"开关（默认关闭）
+func (s *Service) GetRegistrationInviteOnly() (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	value, err := s.GetByKey(constants.SettingKeyRegistrationConfig)
+	if err != nil || value == nil {
+		return false, err
+	}
+	return settingsvalue.ParseBool(value[constants.SettingFieldRegistrationInviteOnly]), nil
 }
 
 // GetEmailVerificationEnabled 获取邮箱验证开关
@@ -269,7 +307,7 @@ func (s *Service) GetEmailVerificationEnabled(defaultValue bool) (bool, error) {
 	if !ok {
 		return defaultValue, nil
 	}
-	return parseSettingBool(raw), nil
+	return settingsvalue.ParseBool(raw), nil
 }
 
 // GetRegistrationEmailDomainPolicy 获取注册邮箱域名白名单策略。
@@ -286,7 +324,7 @@ func (s *Service) GetRegistrationEmailDomainPolicy() (RegistrationEmailDomainPol
 		return policy, nil
 	}
 	if raw, ok := value[constants.SettingFieldEmailDomainAllowlistEnabled]; ok {
-		policy.Enabled = parseSettingBool(raw)
+		policy.Enabled = settingsvalue.ParseBool(raw)
 	}
 	policy.AllowedDomains = normalizeRegistrationEmailDomains(value[constants.SettingFieldAllowedEmailDomains])
 	return policy, nil
@@ -377,7 +415,24 @@ func (s *Service) GetWalletOnlyPayment() bool {
 	if !ok {
 		return false
 	}
-	return parseSettingBool(raw)
+	return settingsvalue.ParseBool(raw)
+}
+
+// GetPaymentFeeConfig 获取支付手续费与旧订单兼容配置。
+func (s *Service) GetPaymentFeeConfig() PaymentFeeConfig {
+	fallback := DefaultPaymentFeeConfig()
+	if s == nil {
+		return fallback
+	}
+	value, err := s.GetByKey(constants.SettingKeyPaymentConfig)
+	if err != nil || value == nil {
+		return fallback
+	}
+	normalized := NormalizePaymentFeeConfig(value)
+	return PaymentFeeConfig{
+		CustomerFeeEnabled:         settingsvalue.ParseBool(normalized[constants.SettingFieldCustomerFeeEnabled]),
+		ReuseLegacyOrderFeePayment: settingsvalue.ParseBool(normalized[constants.SettingFieldReuseLegacyOrderFeePayment]),
+	}
 }
 
 // GetWalletRechargeChannelIDs 获取钱包充值允许的支付渠道ID列表

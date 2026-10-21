@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/modules/notification/contract"
 	"github.com/dujiao-next/internal/modules/notification/domain"
 	settingsmessaging "github.com/dujiao-next/internal/modules/settings/schema/messaging"
@@ -126,7 +127,9 @@ func (h *AdminHandler) TestNotificationCenterSettings(c *gin.Context) {
 		return
 	}
 	channel := strings.ToLower(strings.TrimSpace(req.Channel))
-	if channel != "email" && channel != "telegram" {
+	if channel != constants.NotificationChannelEmail &&
+		channel != constants.NotificationChannelTelegram &&
+		channel != constants.NotificationChannelFeishu {
 		ginutil.RespondError(c, response.CodeBadRequest, "error.bad_request", nil)
 		return
 	}

@@ -1,6 +1,7 @@
 package paymenthttp
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	paymentcontract "github.com/dujiao-next/internal/modules/payment/contract"
 	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
 
 	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
@@ -91,7 +93,9 @@ type fakeAdminOrderLookup struct {
 }
 
 type fakeAdminChannelCatalog struct {
-	channel *paymentdomain.PaymentChannel
+	channel            *paymentdomain.PaymentChannel
+	securityTestResult *paymentcontract.GatewaySecurityTestResult
+	securityTestErr    error
 }
 
 func (f *fakeAdminChannelCatalog) ValidateChannel(*paymentdomain.PaymentChannel) error { return nil }
@@ -116,6 +120,37 @@ func (f *fakeAdminChannelCatalog) Update(channel *paymentdomain.PaymentChannel) 
 	return nil
 }
 func (f *fakeAdminChannelCatalog) Delete(uint) error { return nil }
+func (f *fakeAdminChannelCatalog) TestChannelSecurity(context.Context, uint) (*paymentcontract.GatewaySecurityTestResult, error) {
+	return f.securityTestResult, f.securityTestErr
+}
+
+func TestWechatPayPublicKeySecurityTestReturnsSafeResult(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	catalog := &fakeAdminChannelCatalog{
+		channel: &paymentdomain.PaymentChannel{ID: 1},
+		securityTestResult: &paymentcontract.GatewaySecurityTestResult{
+			VerificationMode:         "wechatpay_public_key",
+			ResponseSerial:           "PUB_KEY_ID_3000000001",
+			RequestSignatureAccepted: true,
+			ResponseSignatureValid:   true,
+			EchoMessageMatched:       true,
+		},
+	}
+	handler := NewAdminChannelHandler(catalog)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: "1"}}
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/admin/payment-channels/1/wechatpay-public-key-test", nil)
+
+	handler.TestWechatPayPublicKey(ctx)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"response_serial":"PUB_KEY_ID_3000000001"`) ||
+		!strings.Contains(body, `"response_signature_valid":true`) ||
+		!strings.Contains(body, `"echo_message_matched":true`) {
+		t.Fatalf("unexpected security test response: %s", body)
+	}
+}
 
 func TestGetPaymentChannelRedactsSecrets(t *testing.T) {
 	gin.SetMode(gin.TestMode)

@@ -103,6 +103,7 @@ func (a *stripeAdapter) CreatePayment(ctx context.Context, raw jsonmap.JSON, inp
 		Amount:      payAmount,
 		Currency:    payCurrency,
 		Description: input.Subject,
+		Email:       strings.TrimSpace(input.Email),
 		SuccessURL:  successURL,
 		CancelURL:   cancelURL,
 	}

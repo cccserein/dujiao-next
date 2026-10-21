@@ -36,6 +36,14 @@ interface NotificationData {
       enabled: boolean
       recipients_text: string
     }
+    feishu: {
+      enabled: boolean
+      app_id: string
+      app_secret: string
+      has_app_secret: boolean
+      receive_id_type: string
+      recipients_text: string
+    }
   }
   scenes: {
     wallet_recharge_success: boolean
@@ -99,6 +107,14 @@ const form = reactive({
       enabled: false,
       recipients_text: '',
     },
+    feishu: {
+      enabled: false,
+      app_id: '',
+      app_secret: '',
+      has_app_secret: false,
+      receive_id_type: 'chat_id',
+      recipients_text: '',
+    },
   },
   scenes: {
     wallet_recharge_success: true,
@@ -125,6 +141,12 @@ const syncFromProps = () => {
   form.channels.email.recipients_text = props.data.channels.email.recipients_text
   form.channels.telegram.enabled = props.data.channels.telegram.enabled
   form.channels.telegram.recipients_text = props.data.channels.telegram.recipients_text
+  form.channels.feishu.enabled = props.data.channels.feishu.enabled
+  form.channels.feishu.app_id = props.data.channels.feishu.app_id
+  form.channels.feishu.app_secret = ''
+  form.channels.feishu.has_app_secret = props.data.channels.feishu.has_app_secret
+  form.channels.feishu.receive_id_type = props.data.channels.feishu.receive_id_type || 'chat_id'
+  form.channels.feishu.recipients_text = props.data.channels.feishu.recipients_text
   Object.assign(form.scenes, props.data.scenes)
   form.templates.wallet_recharge_success = deepCloneTemplate(props.data.templates.wallet_recharge_success)
   form.templates.order_paid_success = deepCloneTemplate(props.data.templates.order_paid_success)
@@ -258,6 +280,13 @@ const save = async () => {
         telegram: {
           enabled: form.channels.telegram.enabled,
           recipients: splitRecipients(form.channels.telegram.recipients_text),
+        },
+        feishu: {
+          enabled: form.channels.feishu.enabled,
+          app_id: form.channels.feishu.app_id.trim(),
+          app_secret: form.channels.feishu.app_secret.trim(),
+          receive_id_type: form.channels.feishu.receive_id_type,
+          recipients: splitRecipients(form.channels.feishu.recipients_text),
         },
       },
       scenes: {
@@ -421,6 +450,69 @@ defineExpose({ save, submitting })
                   :placeholder="t('admin.settings.notification.channels.telegram.recipientsPlaceholder')"
                 />
               </div>
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-border md:col-span-2">
+            <div class="border-b border-border bg-muted/30 px-4 py-3">
+              <h3 class="text-sm font-semibold">{{ t('admin.settings.notification.channels.feishu.title') }}</h3>
+              <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.settings.notification.channels.feishu.subtitle') }}</p>
+            </div>
+            <div class="space-y-4 p-4">
+              <div class="flex items-center gap-2">
+                <Switch v-model="form.channels.feishu.enabled" />
+                <Label class="text-sm">{{ t('admin.settings.notification.channels.feishu.enabled') }}</Label>
+              </div>
+              <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div class="space-y-2">
+                  <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.notification.channels.feishu.appID') }}</label>
+                  <Input
+                    v-model="form.channels.feishu.app_id"
+                    :placeholder="t('admin.settings.notification.channels.feishu.appIDPlaceholder')"
+                    autocomplete="off"
+                  />
+                </div>
+                <div class="space-y-2">
+                  <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.notification.channels.feishu.appSecret') }}</label>
+                  <Input
+                    v-model="form.channels.feishu.app_secret"
+                    type="password"
+                    :placeholder="t('admin.settings.notification.channels.feishu.appSecretPlaceholder')"
+                    autocomplete="new-password"
+                  />
+                  <p class="text-xs text-muted-foreground">
+                    {{ t(form.channels.feishu.has_app_secret
+                      ? 'admin.settings.notification.channels.feishu.appSecretHintKeep'
+                      : 'admin.settings.notification.channels.feishu.appSecretHintEmpty') }}
+                  </p>
+                </div>
+              </div>
+              <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div class="space-y-2">
+                  <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.notification.channels.feishu.receiveIDType') }}</label>
+                  <Select v-model="form.channels.feishu.receive_id_type">
+                    <SelectTrigger class="h-10">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="chat_id">{{ t('admin.settings.notification.channels.feishu.receiveIDTypes.chatID') }}</SelectItem>
+                      <SelectItem value="open_id">{{ t('admin.settings.notification.channels.feishu.receiveIDTypes.openID') }}</SelectItem>
+                      <SelectItem value="user_id">{{ t('admin.settings.notification.channels.feishu.receiveIDTypes.userID') }}</SelectItem>
+                      <SelectItem value="union_id">{{ t('admin.settings.notification.channels.feishu.receiveIDTypes.unionID') }}</SelectItem>
+                      <SelectItem value="email">{{ t('admin.settings.notification.channels.feishu.receiveIDTypes.email') }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div class="space-y-2">
+                  <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.notification.channels.feishu.recipients') }}</label>
+                  <Textarea
+                    v-model="form.channels.feishu.recipients_text"
+                    rows="4"
+                    :placeholder="t('admin.settings.notification.channels.feishu.recipientsPlaceholder')"
+                  />
+                </div>
+              </div>
+              <p class="text-xs text-muted-foreground">{{ t('admin.settings.notification.channels.feishu.permissionHint') }}</p>
             </div>
           </div>
         </div>

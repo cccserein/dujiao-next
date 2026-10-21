@@ -135,7 +135,21 @@ func NewOrderDetail(o *orderdomain.Order) OrderDetail {
 	for i := range o.Children {
 		d.Children = append(d.Children, NewOrderDetail(&o.Children[i]))
 	}
+	if !o.CanReadFulfillment() {
+		maskFulfillmentContent(&d)
+	}
 	return d
+}
+
+func maskFulfillmentContent(d *OrderDetail) {
+	if d.Fulfillment != nil {
+		d.Fulfillment.Payload = ""
+		d.Fulfillment.PayloadLineCount = 0
+		d.Fulfillment.DeliveryData = nil
+	}
+	for i := range d.Children {
+		maskFulfillmentContent(&d.Children[i])
+	}
 }
 
 // NewOrderDetailTruncated 同 NewOrderDetail，但额外截断交付内容。

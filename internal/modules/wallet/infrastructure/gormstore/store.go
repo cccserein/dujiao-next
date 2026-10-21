@@ -117,6 +117,22 @@ func (s *Store) CreateTransaction(transaction *walletdomain.Transaction) error {
 	return s.db.Create(transaction).Error
 }
 
+// CountOrderTransactionsByType 统计订单在某一流水类型下已经发生的次数，
+// 用于给订单余额分配生成轮次幂等键。
+func (s *Store) CountOrderTransactionsByType(orderID uint, transactionType string) (int64, error) {
+	transactionType = strings.TrimSpace(transactionType)
+	if orderID == 0 || transactionType == "" {
+		return 0, nil
+	}
+	var count int64
+	if err := s.db.Model(&walletdomain.Transaction{}).
+		Where("order_id = ? AND type = ? AND deleted_at IS NULL", orderID, transactionType).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (s *Store) GetTransactionByReference(reference string) (*walletdomain.Transaction, error) {
 	reference = strings.TrimSpace(reference)
 	if reference == "" {

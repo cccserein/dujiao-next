@@ -6,6 +6,8 @@ import type { AdminOrderRefund } from '@/api/types'
 import IdCell from '@/components/IdCell.vue'
 import { Copy } from 'lucide-vue-next'
 import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogScrollContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { copyText } from '@/utils/clipboard'
 import { formatDate, getLocalizedText } from '@/utils/format'
@@ -19,6 +21,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
+  (e: 'updated'): void
 }>()
 
 const { t, locale } = useI18n()
@@ -29,11 +32,19 @@ const entrySkuLabel = (entry: Record<string, unknown>) =>
 const detailLoading = ref(false)
 const detailError = ref('')
 const detailRefund = ref<AdminOrderRefund | null>(null)
+const paymentFeeRefunded = ref(false)
+const paymentFeeUpdating = ref(false)
+const paymentFeeUpdateError = ref('')
+const paymentFeeUpdateSuccess = ref('')
 
 const resetDetail = () => {
   detailLoading.value = false
   detailError.value = ''
   detailRefund.value = null
+  paymentFeeRefunded.value = false
+  paymentFeeUpdating.value = false
+  paymentFeeUpdateError.value = ''
+  paymentFeeUpdateSuccess.value = ''
 }
 
 const resolveOrderDetailLink = (refund: AdminOrderRefund | null) => {
@@ -62,10 +73,31 @@ const fetchRefundDetail = async (refundId: number) => {
   try {
     const response = await adminAPI.getOrderRefund(refundId)
     detailRefund.value = response.data.data
+    paymentFeeRefunded.value = Boolean(detailRefund.value?.payment_fee_refunded)
   } catch (err: any) {
     detailError.value = err?.message || t('admin.orderRefunds.detailFetchFailed')
   } finally {
     detailLoading.value = false
+  }
+}
+
+const updatePaymentFeeRefunded = async () => {
+  if (!detailRefund.value || detailRefund.value.type !== 'manual') return
+  paymentFeeUpdating.value = true
+  paymentFeeUpdateError.value = ''
+  paymentFeeUpdateSuccess.value = ''
+  try {
+    const response = await adminAPI.updateOrderRefundPaymentFee(detailRefund.value.id, {
+      payment_fee_refunded: paymentFeeRefunded.value,
+    })
+    detailRefund.value = response.data.data
+    paymentFeeRefunded.value = Boolean(detailRefund.value?.payment_fee_refunded)
+    paymentFeeUpdateSuccess.value = t('admin.orderRefunds.paymentFeeUpdateSuccess')
+    emit('updated')
+  } catch (err: any) {
+    paymentFeeUpdateError.value = err?.message || t('admin.orderRefunds.paymentFeeUpdateFailed')
+  } finally {
+    paymentFeeUpdating.value = false
   }
 }
 
@@ -166,6 +198,37 @@ watch(
               <CardContent class="p-4">
                 <div class="mb-2 text-xs text-muted-foreground">{{ t('admin.orderRefunds.detailCreatedAt') }}</div>
                 <div class="text-foreground">{{ formatDate(detailRefund.created_at) }}</div>
+              </CardContent>
+            </Card>
+            <Card class="rounded-lg border-border bg-background shadow-none md:col-span-2">
+              <CardContent class="space-y-3 p-4">
+                <div class="text-xs text-muted-foreground">{{ t('admin.orderRefunds.detailPaymentFeeRefund') }}</div>
+                <label v-if="detailRefund.type === 'manual'" class="flex cursor-pointer items-start gap-2">
+                  <Checkbox v-model="paymentFeeRefunded" class="mt-0.5" :disabled="paymentFeeUpdating" />
+                  <span>
+                    <span class="block text-sm font-medium text-foreground">{{ t('admin.orderRefunds.paymentFeeRefunded') }}</span>
+                    <span class="mt-0.5 block text-xs text-muted-foreground">{{ t('admin.orderRefunds.paymentFeeRefundedHint') }}</span>
+                  </span>
+                </label>
+                <div v-else class="text-sm text-muted-foreground">{{ t('admin.orderRefunds.paymentFeeNotRefunded') }}</div>
+                <div class="text-sm text-foreground">
+                  {{ t('admin.orderRefunds.detailPaymentFeeRefundedAmount') }}：
+                  <span class="font-mono">{{ detailRefund.payment_fee_refunded_amount }} {{ detailRefund.currency }}</span>
+                </div>
+                <Button
+                  v-if="detailRefund.type === 'manual'"
+                  size="sm"
+                  :disabled="paymentFeeUpdating || paymentFeeRefunded === detailRefund.payment_fee_refunded"
+                  @click="updatePaymentFeeRefunded"
+                >
+                  {{ paymentFeeUpdating ? t('admin.orderRefunds.paymentFeeUpdating') : t('admin.orderRefunds.paymentFeeUpdate') }}
+                </Button>
+                <div v-if="paymentFeeUpdateError" class="rounded-lg border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
+                  {{ paymentFeeUpdateError }}
+                </div>
+                <div v-if="paymentFeeUpdateSuccess" class="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-700">
+                  {{ paymentFeeUpdateSuccess }}
+                </div>
               </CardContent>
             </Card>
           </div>

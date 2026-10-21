@@ -41,6 +41,7 @@ interface DashboardOverview {
     processing_orders: number
     gmv_paid: string
     total_cost: string
+    payment_fee: string
     total_profit: string
     profit_margin: string
     payments_total: number
@@ -126,6 +127,7 @@ const overview = ref<DashboardOverview | null>(null)
 const trends = ref<DashboardTrends | null>(null)
 const rankings = ref<DashboardRankings | null>(null)
 const inventoryAlerts = ref<AdminDashboardInventoryAlert[]>([])
+const inventoryAlertsDisplayLimit = ref(10)
 
 const filters = reactive({
   range: '7d',
@@ -347,6 +349,18 @@ const skuSpecLabel = (item: AdminDashboardInventoryAlert) => {
   return Object.values(item.sku_spec_values).join(' / ')
 }
 
+const displayedInventoryAlerts = computed(() => {
+  return inventoryAlerts.value.slice(0, inventoryAlertsDisplayLimit.value)
+})
+
+const hasMoreInventoryAlerts = computed(() => {
+  return inventoryAlerts.value.length > inventoryAlertsDisplayLimit.value
+})
+
+const loadMoreInventoryAlerts = () => {
+  inventoryAlertsDisplayLimit.value += 10
+}
+
 const quickActions = computed(() => [
   { label: t('admin.nav.orders'), path: '/orders' },
   { label: t('admin.nav.payments'), path: '/payments' },
@@ -442,6 +456,7 @@ onMounted(() => {
         </CardHeader>
         <CardContent>
           <div class="text-2xl font-semibold">{{ formatMoney(overview?.kpi.total_cost, overview?.currency) }}</div>
+          <div class="mt-1 text-xs text-muted-foreground">{{ t('admin.dashboard.kpi.paymentFee') }}: {{ formatMoney(overview?.kpi.payment_fee, overview?.currency) }}</div>
         </CardContent>
       </Card>
 
@@ -704,7 +719,7 @@ onMounted(() => {
           <div v-if="inventoryAlerts.length > 0" class="space-y-2">
             <div class="text-xs font-medium text-muted-foreground mb-1">{{ t('admin.dashboard.inventoryAlerts.title') }}</div>
             <div
-              v-for="(item, idx) in inventoryAlerts"
+              v-for="(item, idx) in displayedInventoryAlerts"
               :key="`inv-${item.product_id}-${item.sku_id || 0}-${idx}`"
               class="rounded-lg border border-border px-3 py-2 text-sm"
             >
@@ -726,6 +741,15 @@ onMounted(() => {
                 </div>
               </div>
             </div>
+            <Button
+              v-if="hasMoreInventoryAlerts"
+              variant="outline"
+              size="sm"
+              class="w-full mt-2"
+              @click="loadMoreInventoryAlerts"
+            >
+              {{ t('admin.dashboard.inventoryAlerts.loadMore', { count: inventoryAlerts.length - inventoryAlertsDisplayLimit }) }}
+            </Button>
           </div>
           <div v-if="(!overview || overview.alerts.length === 0) && inventoryAlerts.length === 0" class="text-sm text-muted-foreground">
             {{ t('admin.dashboard.alerts.empty') }}

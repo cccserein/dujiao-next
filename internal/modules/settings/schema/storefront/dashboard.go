@@ -19,10 +19,16 @@ type DashboardRankingSetting struct {
 	TopChannelsLimit int `json:"top_channels_limit"`
 }
 
+// DashboardAccountingSetting 描述仪表盘财务统计口径。
+type DashboardAccountingSetting struct {
+	RefundReversesCost bool `json:"refund_reverses_cost"`
+}
+
 // DashboardSetting 是仪表盘设置的 typed representation。
 type DashboardSetting struct {
-	Alert   DashboardAlertSetting   `json:"alert"`
-	Ranking DashboardRankingSetting `json:"ranking"`
+	Alert      DashboardAlertSetting      `json:"alert"`
+	Ranking    DashboardRankingSetting    `json:"ranking"`
+	Accounting DashboardAccountingSetting `json:"accounting"`
 }
 
 // DefaultDashboardSetting 返回稳定的仪表盘默认设置。
@@ -37,6 +43,9 @@ func DefaultDashboardSetting() DashboardSetting {
 		Ranking: DashboardRankingSetting{
 			TopProductsLimit: 5,
 			TopChannelsLimit: 5,
+		},
+		Accounting: DashboardAccountingSetting{
+			RefundReversesCost: false,
 		},
 	})
 }
@@ -89,6 +98,13 @@ func DecodeDashboardSetting(raw jsonmap.JSON, fallback DashboardSetting) Dashboa
 			result.Ranking.TopChannelsLimit = parsed
 		}
 	}
+	if accounting, ok := raw["accounting"].(map[string]interface{}); ok {
+		result.Accounting.RefundReversesCost = settingsvalue.ReadBool(
+			accounting,
+			"refund_reverses_cost",
+			result.Accounting.RefundReversesCost,
+		)
+	}
 	return NormalizeDashboardSetting(result)
 }
 
@@ -105,6 +121,9 @@ func EncodeDashboardSetting(setting DashboardSetting) jsonmap.JSON {
 		"ranking": map[string]interface{}{
 			"top_products_limit": normalized.Ranking.TopProductsLimit,
 			"top_channels_limit": normalized.Ranking.TopChannelsLimit,
+		},
+		"accounting": map[string]interface{}{
+			"refund_reverses_cost": normalized.Accounting.RefundReversesCost,
 		},
 	}
 }

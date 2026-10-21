@@ -178,7 +178,7 @@
                   <img v-if="channel.icon" :src="getImageUrl(channel.icon)" loading="lazy" class="h-5 w-5 flex-none rounded-[4px] object-contain" />
                   <span class="truncate font-semibold text-foreground">{{ channel.name }}</span>
                 </div>
-                <div class="mt-1.5 grid gap-0.5 text-[11.5px] text-muted-foreground">
+                <div v-if="channel.fee_policy === 'customer_surcharge'" class="mt-1.5 grid gap-0.5 text-[11.5px] text-warning">
                   <div>{{ t('payment.feeLabel') }}：{{ formatChannelFeeRate(channel) }}</div>
                   <div>{{ t('payment.fixedFeeLabel') }}：{{ formatChannelFixedFee(channel) }}</div>
                 </div>

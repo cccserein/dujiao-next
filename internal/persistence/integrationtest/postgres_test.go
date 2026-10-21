@@ -53,6 +53,7 @@ func setupPostgresIntegrationDB(t *testing.T) *gorm.DB {
 		&paymentdomain.Payment{},
 		&orderdomain.Order{},
 		&contentdomain.PostProduct{},
+		&productdomain.ProductSKU{},
 		&productdomain.Product{},
 		&categorydomain.Category{},
 		&contentdomain.Banner{},
@@ -60,9 +61,11 @@ func setupPostgresIntegrationDB(t *testing.T) *gorm.DB {
 	}
 	_ = db.Migrator().DropTable(cleanupModels...)
 
+	// product_skus 必须建表：商品搜索条件里含有对 product_skus 的 EXISTS 子查询
 	if err := db.AutoMigrate(
 		&categorydomain.Category{},
 		&productdomain.Product{},
+		&productdomain.ProductSKU{},
 		&contentdomain.Post{},
 		&contentdomain.PostProduct{},
 		&contentdomain.Banner{},
@@ -281,6 +284,101 @@ func TestPostgresContentGormStoresPreserveQuerySemantics(t *testing.T) {
 	}
 	if inactiveBanner.IsActive || reloadedInactiveBanner.IsActive {
 		t.Fatalf("explicit inactive postgres banner should stay inactive, returned=%t stored=%t", inactiveBanner.IsActive, reloadedInactiveBanner.IsActive)
+	}
+}
+
+// 后台商品列表的上架状态筛选在 PostgreSQL 上需与 SQLite 语义一致：
+// IsActive 三态过滤必须与 search（PostgreSQL 走 ILIKE + jsonb ->>）、
+// wholesale（PostgreSQL 走 jsonb_array_length）按 AND 正确组合。
+func TestPostgresProductListActiveStateFilter(t *testing.T) {
+	db := setupPostgresIntegrationDB(t)
+
+	category := &categorydomain.Category{
+		Slug:     "pg-active-state-category",
+		NameJSON: jsonmap.JSON{"zh-CN": "上架状态分类"},
+	}
+	if err := db.Create(category).Error; err != nil {
+		t.Fatalf("create category failed: %v", err)
+	}
+
+	productRepo := productgormstore.NewProductStore(db)
+
+	seed := func(slug string, isActive bool, withWholesale bool) *productdomain.Product {
+		product := &productdomain.Product{
+			CategoryID:       category.ID,
+			Slug:             slug,
+			TitleJSON:        jsonmap.JSON{"zh-CN": "上架状态商品"},
+			PriceAmount:      money.FromDecimal(decimal.NewFromInt(50)),
+			PurchaseType:     constants.ProductPurchaseMember,
+			FulfillmentType:  constants.FulfillmentTypeManual,
+			ManualStockTotal: 5,
+			IsActive:         isActive,
+		}
+		if withWholesale {
+			product.WholesalePrices = productdomain.WholesalePriceTiers{
+				{MinQuantity: 5, UnitPrice: money.FromDecimal(decimal.NewFromInt(40))},
+			}
+		}
+		if err := productRepo.Create(product); err != nil {
+			t.Fatalf("create postgres product %q failed: %v", slug, err)
+		}
+		// is_active 带 default:false，需确认下架商品在 PostgreSQL 上确实落库为 false
+		var stored productdomain.Product
+		if err := db.First(&stored, product.ID).Error; err != nil {
+			t.Fatalf("reload postgres product %q failed: %v", slug, err)
+		}
+		if stored.IsActive != isActive {
+			t.Fatalf("postgres product %q stored is_active=%t want %t", slug, stored.IsActive, isActive)
+		}
+		return product
+	}
+
+	active := seed("pg-state-active", true, true)
+	inactive := seed("pg-state-inactive", false, true)
+	inactiveWithoutWholesale := seed("pg-state-inactive-plain", false, false)
+
+	listSlugs := func(filter productcontract.ListFilter) map[string]bool {
+		t.Helper()
+		filter.Page = 1
+		filter.PageSize = 50
+		rows, _, err := productRepo.List(filter)
+		if err != nil {
+			t.Fatalf("postgres product list failed: %v", err)
+		}
+		got := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			got[row.Slug] = true
+		}
+		return got
+	}
+
+	onlyActive := true
+	onlyInactive := false
+	withWholesale := true
+
+	got := listSlugs(productcontract.ListFilter{IsActive: &onlyActive})
+	if !got[active.Slug] || got[inactive.Slug] {
+		t.Fatalf("postgres IsActive=true should return only active rows, got %+v", got)
+	}
+
+	got = listSlugs(productcontract.ListFilter{IsActive: &onlyInactive})
+	if !got[inactive.Slug] || !got[inactiveWithoutWholesale.Slug] || got[active.Slug] {
+		t.Fatalf("postgres IsActive=false should return only inactive rows, got %+v", got)
+	}
+
+	got = listSlugs(productcontract.ListFilter{IsActive: &onlyInactive, Search: "上架状态"})
+	if !got[inactive.Slug] || got[active.Slug] {
+		t.Fatalf("postgres IsActive=false + localized search mismatch, got %+v", got)
+	}
+
+	got = listSlugs(productcontract.ListFilter{IsActive: &onlyInactive, HasWholesalePrices: &withWholesale})
+	if !got[inactive.Slug] || got[inactiveWithoutWholesale.Slug] || got[active.Slug] {
+		t.Fatalf("postgres IsActive=false + wholesale mismatch, got %+v", got)
+	}
+
+	got = listSlugs(productcontract.ListFilter{IsActive: &onlyInactive, Search: "绝不匹配的关键词"})
+	if len(got) != 0 {
+		t.Fatalf("postgres IsActive=false + non-matching search should be empty, got %+v", got)
 	}
 }
 

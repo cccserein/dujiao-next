@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +244,51 @@ func TestBatchUpdateProductStatusReturnsFailureReasons(t *testing.T) {
 	}
 }
 
+func TestBatchUpdateProductStockDisplay(t *testing.T) {
+	h, db := setupAdminProductHandlerTest(t)
+
+	product := productdomain.Product{
+		Slug:            "batch-stock-display-product",
+		TitleJSON:       jsonmap.JSON{"zh-CN": "batch-stock-display-product"},
+		PriceAmount:     money.FromDecimal(decimal.NewFromInt(10)),
+		FulfillmentType: constants.FulfillmentTypeUpstream,
+		IsMapped:        true,
+	}
+	if err := db.Create(&product).Error; err != nil {
+		t.Fatalf("create product failed: %v", err)
+	}
+
+	post := func(body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/products/batch-stock-display", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+		h.BatchUpdateProductStockDisplay(c)
+		var resp struct {
+			StatusCode int `json:"status_code"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+		}
+		return resp.StatusCode
+	}
+
+	if code := post(fmt.Sprintf(`{"ids":[%d],"stock_display_mode":"bogus"}`, product.ID)); code == 0 {
+		t.Fatal("expected invalid mode to be rejected")
+	}
+	if code := post(fmt.Sprintf(`{"ids":[%d],"stock_display_mode":"range"}`, product.ID)); code != 0 {
+		t.Fatalf("expected success, got status_code %d", code)
+	}
+	var reloaded productdomain.Product
+	if err := db.First(&reloaded, product.ID).Error; err != nil {
+		t.Fatalf("reload product failed: %v", err)
+	}
+	if reloaded.StockDisplayMode != constants.ProductStockDisplayRange {
+		t.Fatalf("expected range, got %q", reloaded.StockDisplayMode)
+	}
+}
+
 func TestUpdateProductWholesalePricesHandlerUpdatesTiers(t *testing.T) {
 	h, db := setupAdminProductHandlerTest(t)
 
@@ -383,5 +429,79 @@ func TestUpdateProductWholesalePricesHandlerReturnsNotFound(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected product not found response, got body=%s", w.Body.String())
+	}
+}
+
+// 后台商品列表的上架状态筛选：is_active=1 只看已上架，is_active=0 只看已下架。
+func TestAdminProductListFiltersByActiveState(t *testing.T) {
+	h, db := setupAdminProductHandlerTest(t)
+
+	seed := func(slug string, isActive bool) productdomain.Product {
+		row := productdomain.Product{
+			CategoryID:       1,
+			Slug:             slug,
+			TitleJSON:        jsonmap.JSON{"zh-CN": "上架状态筛选商品"},
+			PriceAmount:      money.FromDecimal(decimal.NewFromInt(10)),
+			FulfillmentType:  constants.FulfillmentTypeManual,
+			ManualStockTotal: 5,
+			IsActive:         isActive,
+		}
+		if err := db.Create(&row).Error; err != nil {
+			t.Fatalf("create product %s failed: %v", slug, err)
+		}
+		return row
+	}
+	active := seed("api-state-active", true)
+	inactive := seed("api-state-inactive", false)
+
+	listSlugs := func(query string) map[string]bool {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/products?"+query, nil)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		h.GetAdminProducts(c)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200 for %q, got %d body=%s", query, w.Code, w.Body.String())
+		}
+		var resp struct {
+			Data []productdomain.Product `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+		}
+		got := make(map[string]bool, len(resp.Data))
+		for _, row := range resp.Data {
+			got[row.Slug] = true
+		}
+		return got
+	}
+
+	got := listSlugs("is_active=1")
+	if !got[active.Slug] || got[inactive.Slug] {
+		t.Fatalf("is_active=1 should return only active rows, got %+v", got)
+	}
+
+	got = listSlugs("is_active=0")
+	if !got[inactive.Slug] || got[active.Slug] {
+		t.Fatalf("is_active=0 should return only inactive rows, got %+v", got)
+	}
+
+	got = listSlugs("is_active=all")
+	if !got[active.Slug] || !got[inactive.Slug] {
+		t.Fatalf("is_active=all should return both rows, got %+v", got)
+	}
+
+	// 与其他条件联动：is_active=0 叠加 search，仍应 AND 生效
+	got = listSlugs("is_active=0&search=" + url.QueryEscape("上架状态筛选"))
+	if !got[inactive.Slug] || got[active.Slug] {
+		t.Fatalf("is_active=0 + search should still exclude active rows, got %+v", got)
+	}
+
+	got = listSlugs("is_active=0&search=" + url.QueryEscape("绝不匹配的关键词"))
+	if len(got) != 0 {
+		t.Fatalf("is_active=0 + non-matching search should be empty, got %+v", got)
 	}
 }

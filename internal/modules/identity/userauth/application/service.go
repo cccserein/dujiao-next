@@ -3,8 +3,10 @@ package application
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"github.com/dujiao-next/internal/telegramidentity"
 	"math/big"
 	"net/mail"
 	"strings"
@@ -48,6 +50,7 @@ type Service struct {
 	googleRedirectStore   GoogleRedirectStore
 	memberLevelSvc        MemberLevelAssigner
 	authUnitOfWork        AuthUnitOfWork
+	inviteCodes           InviteCodeChecker
 }
 
 type MemberLevelAssigner interface {
@@ -109,7 +112,23 @@ type UserJWTClaims struct {
 	Email        string `json:"email"`
 	TokenVersion uint64 `json:"token_version"`
 	Typ          string `json:"typ,omitempty"`
+	// ResellerID 签发时所在的分销站点（主站为 0）。令牌只在同一站点有效，
+	// 防止分销商在自己的域名上截获的令牌被拿到主站或其他分销站使用。
+	ResellerID uint `json:"rid,omitempty"`
 	jwt.RegisteredClaims
+}
+
+// BindUserTokenTenant 将访问令牌绑定到签发请求所在的分销站点；主站（resellerID=0）原样返回。
+func (s *Service) BindUserTokenTenant(tokenString string, resellerID uint) (string, error) {
+	if resellerID == 0 || tokenString == "" {
+		return tokenString, nil
+	}
+	claims, err := s.ParseUserJWT(tokenString)
+	if err != nil {
+		return "", err
+	}
+	claims.ResellerID = resellerID
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.UserJWT.SecretKey))
 }
 
 // UserChallengeClaims 用户 2FA 挑战 token claims
@@ -117,12 +136,13 @@ type UserJWTClaims struct {
 // 注：Typ 字段同时占用与 UserJWTClaims 兼容的 typ 键，写入 "2fa_challenge"，
 // 防止挑战 token 在被错误地解析为 UserJWTClaims 时通过中间件的 typ 校验。
 type UserChallengeClaims struct {
-	UserID      uint   `json:"user_id"`
-	JTI         string `json:"jti"`
-	Purpose     string `json:"purpose"`
-	RememberMe  bool   `json:"remember_me"`
-	LoginSource string `json:"login_source,omitempty"`
-	Typ         string `json:"typ"`
+	UserID       uint   `json:"user_id"`
+	TokenVersion uint64 `json:"token_version"`
+	JTI          string `json:"jti"`
+	Purpose      string `json:"purpose"`
+	RememberMe   bool   `json:"remember_me"`
+	LoginSource  string `json:"login_source,omitempty"`
+	Typ          string `json:"typ"`
 	jwt.RegisteredClaims
 }
 
@@ -135,6 +155,9 @@ type UserLoginResult struct {
 	ChallengeToken     string
 	ChallengeJTI       string
 	ChallengeExpiresAt time.Time
+	// InviteRequired 表示第三方身份已验证但需补填邀请码才能建号，InviteTicket 用于提交补全。
+	InviteRequired bool
+	InviteTicket   string
 }
 
 const (
@@ -191,8 +214,8 @@ func (s *Service) ParseUserJWT(tokenString string) (*UserJWTClaims, error) {
 	return nil, errors.New("无效的 token")
 }
 
-// SendVerifyCode 发送邮箱验证码
-func (s *Service) SendVerifyCode(ctx context.Context, email, purpose, locale string) error {
+// SendVerifyCode 发送邮箱验证码；inviteCode 仅在注册用途且开启邀请注册时校验（不核销）。
+func (s *Service) SendVerifyCode(ctx context.Context, email, purpose, locale, inviteCode string) error {
 	if s.emailService == nil {
 		return ErrEmailServiceNotConfigured
 	}
@@ -206,7 +229,15 @@ func (s *Service) SendVerifyCode(ctx context.Context, email, purpose, locale str
 	}
 
 	if purpose == constants.VerifyPurposeRegister {
-		if err := s.checkRegistrationEmailDomain(normalized); err != nil {
+		policy, err := s.loadRegistrationPolicy(inviteCode)
+		if err != nil {
+			return err
+		}
+		// 邀请注册模式下先校验邀请码，避免公开的发信接口被用来向任意邮箱发送注册邮件。
+		if err := s.precheckInviteCode(policy); err != nil {
+			return err
+		}
+		if err := settingsapp.CheckRegistrationEmailDomainAllowed(normalized, policy.EmailDomain); err != nil {
 			return err
 		}
 		exist, err := s.userRepo.GetByEmail(normalized)
@@ -247,27 +278,23 @@ func (s *Service) SendVerifyCode(ctx context.Context, email, purpose, locale str
 	return s.sendVerifyCode(ctx, normalized, purpose, locale)
 }
 
-func (s *Service) checkRegistrationEmailDomain(email string) error {
-	if s == nil || s.settingService == nil {
-		return nil
-	}
-	policy, err := s.settingService.GetRegistrationEmailDomainPolicy()
-	if err != nil {
-		return err
-	}
-	return settingsapp.CheckRegistrationEmailDomainAllowed(email, policy)
-}
-
 // Register 用户注册
-func (s *Service) Register(email, password, code string, agreementAccepted bool, emailVerificationEnabled bool) (*userdomain.User, string, time.Time, error) {
+func (s *Service) Register(email, password, code, inviteCode string, agreementAccepted bool, emailVerificationEnabled bool) (*userdomain.User, string, time.Time, error) {
 	if !agreementAccepted {
 		return nil, "", time.Time{}, ErrAgreementRequired
 	}
-	normalized, err := normalizeEmail(email)
+	normalized, err := normalizeUserSuppliedEmail(email)
 	if err != nil {
 		return nil, "", time.Time{}, err
 	}
-	if err := s.checkRegistrationEmailDomain(normalized); err != nil {
+	policy, err := s.loadRegistrationPolicy(inviteCode)
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	if err := s.precheckInviteCode(policy); err != nil {
+		return nil, "", time.Time{}, err
+	}
+	if err := settingsapp.CheckRegistrationEmailDomainAllowed(normalized, policy.EmailDomain); err != nil {
 		return nil, "", time.Time{}, err
 	}
 	if err := passwordpolicy.Validate(s.cfg.Security.PasswordPolicy.ValidationPolicy(), password); err != nil {
@@ -305,7 +332,7 @@ func (s *Service) Register(email, password, code string, agreementAccepted bool,
 		UpdatedAt:       now,
 	}
 
-	if err := s.userRepo.Create(user); err != nil {
+	if err := s.createUserInTransaction(context.Background(), user, policy); err != nil {
 		return nil, "", time.Time{}, err
 	}
 
@@ -397,15 +424,26 @@ func (s *Service) IssueUserChallengeToken(userID uint, rememberMe bool) (token, 
 // IssueUserChallengeTokenForSource signs a 2FA challenge while retaining the
 // original login provider for the completion audit log.
 func (s *Service) IssueUserChallengeTokenForSource(userID uint, rememberMe bool, loginSource string) (token, jti string, expiresAt time.Time, err error) {
+	user, err := s.userRepo.GetByID(userID)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	if user == nil {
+		return "", "", time.Time{}, ErrNotFound
+	}
+	if strings.ToLower(strings.TrimSpace(user.Status)) != constants.UserStatusActive {
+		return "", "", time.Time{}, ErrUserDisabled
+	}
 	jti = uuid.NewString()
 	expiresAt = time.Now().Add(challenge.TTL)
 	claims := UserChallengeClaims{
-		UserID:      userID,
-		JTI:         jti,
-		Purpose:     challenge.PurposeTwoFactor,
-		RememberMe:  rememberMe,
-		LoginSource: normalizeLoginSource(loginSource),
-		Typ:         jwttoken.TypeTwoFactorChallenge,
+		UserID:       userID,
+		TokenVersion: user.TokenVersion,
+		JTI:          jti,
+		Purpose:      challenge.PurposeTwoFactor,
+		RememberMe:   rememberMe,
+		LoginSource:  normalizeLoginSource(loginSource),
+		Typ:          jwttoken.TypeTwoFactorChallenge,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -448,6 +486,12 @@ func (s *Service) ParseUserChallengeToken(tokenString string) (*UserChallengeCla
 	if claims.Purpose != challenge.PurposeTwoFactor || claims.Typ != jwttoken.TypeTwoFactorChallenge {
 		return nil, errors.New("invalid challenge purpose")
 	}
+	user, err := s.userRepo.GetByID(claims.UserID)
+	if err != nil || user == nil || strings.ToLower(strings.TrimSpace(user.Status)) != constants.UserStatusActive ||
+		claims.TokenVersion != user.TokenVersion || claims.IssuedAt == nil ||
+		(user.TokenInvalidBefore != nil && claims.IssuedAt.Time.Unix() < user.TokenInvalidBefore.Unix()) {
+		return nil, errors.New("revoked challenge token")
+	}
 	return claims, nil
 }
 
@@ -459,6 +503,9 @@ func (s *Service) CompleteLoginAfter2FA(userID uint, rememberMe bool) (*UserLogi
 	}
 	if user == nil {
 		return nil, ErrNotFound
+	}
+	if strings.ToLower(strings.TrimSpace(user.Status)) != constants.UserStatusActive {
+		return nil, ErrUserDisabled
 	}
 	expireHours := resolveUserJWTExpireHours(s.cfg.UserJWT)
 	if rememberMe {
@@ -494,18 +541,25 @@ func (s *Service) verifyCode(email, purpose, code string) (*emailverificationdom
 		return nil, ErrVerifyCodeExpired
 	}
 
-	maxAttempts := resolveMaxAttempts(s.cfg.Email.VerifyCode)
-	if maxAttempts > 0 && record.AttemptCount >= maxAttempts {
+	// 先原子占用一次尝试机会再比对：并发猜测请求无法共享同一个"剩余次数"。
+	reserved, err := s.codeRepo.ReserveAttempt(record.ID, resolveMaxAttempts(s.cfg.Email.VerifyCode))
+	if err != nil {
+		return nil, err
+	}
+	if !reserved {
 		return nil, ErrVerifyCodeAttemptsExceeded
 	}
 
-	if strings.TrimSpace(record.Code) != strings.TrimSpace(code) {
-		_ = s.codeRepo.IncrementAttempt(record.ID)
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(record.Code)), []byte(strings.TrimSpace(code))) != 1 {
 		return nil, ErrVerifyCodeInvalid
 	}
 
-	if err := s.codeRepo.MarkVerified(record.ID, now); err != nil {
+	marked, err := s.codeRepo.MarkVerified(record.ID, now)
+	if err != nil {
 		return nil, err
+	}
+	if !marked {
+		return nil, ErrVerifyCodeInvalid
 	}
 	return record, nil
 }
@@ -543,14 +597,16 @@ func (s *Service) sendVerifyCode(ctx context.Context, email, purpose, locale str
 		SentAt:    now,
 		CreatedAt: now,
 	}
-	if err := s.emailService.SendVerifyCode(email, code, purpose, locale, brand); err != nil {
-		return err
-	}
-
+	// 先落库再发信：落库即占用发送间隔，挡住连续重复请求。
+	// shortcut: 查最新记录与落库之间仍有空窗，并发请求可各发一封；出现邮件轰炸再加 Redis SETNX(email+purpose) 锁。
 	if err := s.codeRepo.Create(record); err != nil {
 		return err
 	}
-
+	if err := s.emailService.SendVerifyCode(email, code, purpose, locale, brand); err != nil {
+		// 未送达的验证码不能占用发送间隔，也不能顶替用户手里仍有效的上一封；删除失败只退回旧行为，不掩盖发信错误
+		_ = s.codeRepo.Delete(record.ID)
+		return err
+	}
 	return nil
 }
 
@@ -560,6 +616,19 @@ func normalizeEmail(email string) (string, error) {
 		return "", ErrInvalidEmail
 	}
 	if _, err := mail.ParseAddress(normalized); err != nil {
+		return "", ErrInvalidEmail
+	}
+	return normalized, nil
+}
+
+// normalizeUserSuppliedEmail 用于注册 / 换绑等用户自填邮箱的入口，
+// Telegram 占位邮箱仅由系统生成，不接受用户填写。
+func normalizeUserSuppliedEmail(email string) (string, error) {
+	normalized, err := normalizeEmail(email)
+	if err != nil {
+		return "", err
+	}
+	if telegramidentity.IsPlaceholderEmail(normalized) {
 		return "", ErrInvalidEmail
 	}
 	return normalized, nil
@@ -596,9 +665,9 @@ func resolveRememberMeExpireHours(cfg config.JWTConfig) int {
 func resolveNicknameFromEmail(email string) string {
 	parts := strings.SplitN(email, "@", 2)
 	if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" {
-		return strings.TrimSpace(parts[0])
+		return userdomain.SanitizeDisplayName(parts[0])
 	}
-	return email
+	return userdomain.SanitizeDisplayName(email)
 }
 
 func resolveExpireMinutes(cfg config.VerifyCodeConfig) int {
