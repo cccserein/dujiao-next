@@ -193,6 +193,78 @@ class ReconciliationTests(unittest.TestCase):
         self.assertNotIn("merchant_key", " ".join(run.call_args.args[0]))
 
 
+class UnsettledReconciliationTests(unittest.TestCase):
+    def test_paid_gateway_order_with_expired_local_payment_is_alerted(self):
+        snapshot = fake_snapshot()
+        snapshot["payments"][0]["provider_ref"] = ""
+        response = reply_for(snapshot["payments"][0], trade_no="REAL-DISCOVERED-TRADE")
+        request = mock.Mock(return_value=(200, response))
+        result = gateway.reconcile_snapshot(snapshot, request=request, unsettled=True)
+        args = request.call_args.args
+        self.assertEqual(parse_qs(args[3].decode()), {
+            "pid": ["1001"], "key": ["FAKE-SECRET-DO-NOT-LOG"], "out_trade_no": ["FAKE-ORDER-0"]})
+        self.assertEqual(result["anomalous_order_ids"], [8000])
+        self.assertEqual(result["findings"][0]["reason"], "gateway_paid_local_unsettled")
+        self.assertEqual(result["status"], "mismatch")
+        self.assertFalse(result["incomplete"])
+        self.assertNotIn("REAL-DISCOVERED-TRADE", json.dumps(result))
+        self.assertNotIn("FAKE-SECRET", json.dumps(result))
+
+    def test_confirmed_unpaid_or_missing_gateway_order_is_consistent(self):
+        snapshot = fake_snapshot()
+        for body in (reply_for(snapshot["payments"][0], status=0),
+                     json.dumps({"code": -1, "msg": "订单不存在"}).encode()):
+            with self.subTest(body=body):
+                result = gateway.reconcile_snapshot(snapshot, request=mock.Mock(return_value=(200, body)), unsettled=True)
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["alerts"], [])
+        # A rejected query remains an error when our ledger claims success.
+        result = gateway.reconcile_snapshot(snapshot, request=mock.Mock(return_value=(200, body)))
+        self.assertEqual(result["status"], "failed")
+
+    def test_unpaid_response_still_requires_exact_binding(self):
+        snapshot = fake_snapshot()
+        for field, value in (("money", "0.01"), ("currency", "USD"), ("pid", "9999"),
+                             ("out_trade_no", "OTHER"), ("trade_no", "")):
+            with self.subTest(field=field):
+                body = reply_for(snapshot["payments"][0], status=0, **{field: value})
+                result = gateway.reconcile_snapshot(snapshot, request=mock.Mock(return_value=(200, body)), unsettled=True)
+                self.assertNotEqual(result["status"], "ok")
+
+    def test_ambiguous_status_auth_and_duplicate_fields_are_not_unpaid(self):
+        snapshot = fake_snapshot()
+        bodies = [reply_for(snapshot["payments"][0], status=value) for value in (None, True, 2, "1e0")]
+        bodies += [b'{"code":1,"code":-1}', b'{"code":-1,"msg":"merchant disabled"}',
+                   json.dumps({"code": -2, "msg": "订单不存在"}).encode()]
+        for body in bodies:
+            with self.subTest(body=body):
+                result = gateway.reconcile_snapshot(snapshot, request=mock.Mock(return_value=(200, body)), unsettled=True)
+                self.assertEqual(result["status"], "failed")
+
+    def test_unsettled_budget_and_auth_failure_report_remaining_orders(self):
+        request = mock.Mock(return_value=(401, b""))
+        result = gateway.reconcile_snapshot(fake_snapshot(3), request=request, unsettled=True)
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(result["unchecked_count"], 3)
+        self.assertTrue(result["incomplete"])
+        clock = iter([0, 6])
+        request = mock.Mock()
+        result = gateway.reconcile_snapshot(fake_snapshot(3), budget_seconds=5,
+                                            clock=lambda: next(clock), request=request, unsettled=True)
+        request.assert_not_called()
+        self.assertEqual(result["stopped_reason"], "budget_exhausted")
+
+    def test_snapshot_only_uses_unique_gateway_numbers_for_unsettled(self):
+        with mock.patch.object(gateway.subprocess, "run", return_value=mock.Mock(stdout=json.dumps(fake_snapshot(0)))) as run:
+            gateway.read_snapshot(unsettled=True)
+        sql = run.call_args.kwargs["input"]
+        self.assertIn("BEGIN READ ONLY", sql)
+        self.assertIn("p.status IN ('initiated', 'pending', 'failed', 'expired')", sql)
+        self.assertIn("p.gateway_order_no <> ''", sql)
+        self.assertIn("interval '48 hours'", sql)
+        self.assertNotIn("p.status = 'success'", sql)
+
+
 class TransportTests(unittest.TestCase):
     def test_production_wall_timeout_is_armed_and_restored(self):
         fake_handler = mock.Mock()
@@ -245,6 +317,8 @@ class MonitorIntegrationTests(unittest.TestCase):
         self.assertEqual(result["gateway_reconciliation"]["findings"][0]["payment_id"], 9000)
         self.assertIn("gateway_reconciliation_failed", result["alerts"])
         self.assertIn("gateway_reconciliation_incomplete", result["alerts"])
+        self.assertEqual(result["unsettled_gateway_reconciliation"]["findings"][0]["payment_id"], 9000)
+        self.assertIn("unsettled_gateway_reconciliation_failed", result["alerts"])
 
 
 if __name__ == "__main__":

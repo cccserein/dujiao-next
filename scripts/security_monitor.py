@@ -121,6 +121,7 @@ def main():
     traffic = read_traffic(args.access_log, now)
     health = check_health()
     gateway_reconciliation = reconcile_recent()
+    unsettled_gateway_reconciliation = reconcile_recent(unsettled=True)
     alerts = [name for name in ("paid_amount_gap", "delivery_without_payment", "online_paid_without_success_7d", "successful_payment_unpaid_order_7d", "paid_same_currency_undercoverage") if orders[name] > 0]
     if health != 200:
         alerts.append("health_check_failed")
@@ -129,8 +130,11 @@ def main():
     if sum(int(v) for k, v in traffic["status_counts_24h"].items() if k.startswith("5")) > 20:
         alerts.append("http_5xx_high")
     alerts.extend(gateway_reconciliation["alerts"])
+    alerts.extend(name.replace("gateway_reconciliation", "unsettled_gateway_reconciliation")
+                  for name in unsettled_gateway_reconciliation["alerts"])
     report = {"checked_at": now.isoformat(), "health_status": health, "orders": orders, "traffic": traffic,
-              "gateway_reconciliation": gateway_reconciliation, "alerts": alerts}
+              "gateway_reconciliation": gateway_reconciliation,
+              "unsettled_gateway_reconciliation": unsettled_gateway_reconciliation, "alerts": alerts}
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

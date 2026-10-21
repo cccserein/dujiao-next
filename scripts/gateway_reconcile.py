@@ -53,9 +53,11 @@ def _amount(value):
     return amount
 
 
-def _query_sql(limit):
+def _query_sql(limit, unsettled=False):
     # limit is validated by read_snapshot; the remaining SQL is constant. Every
     # successful payment in the window is included without incident exclusions.
+    payment_filter = ("p.status IN ('initiated', 'pending', 'failed', 'expired') AND p.gateway_order_no <> ''"
+                      if unsettled else "p.status = 'success'")
     return """
 BEGIN READ ONLY;
 SET LOCAL statement_timeout = '20s';
@@ -65,7 +67,7 @@ WITH candidates AS (
     p.amount::text AS amount, p.currency,
     COALESCE(p.paid_at, p.updated_at, p.created_at) AS event_at
   FROM payments p LEFT JOIN orders o ON o.id = p.order_id
-  WHERE p.provider_type = 'epay' AND p.deleted_at IS NULL AND p.status = 'success'
+  WHERE p.provider_type = 'epay' AND p.deleted_at IS NULL AND %s
     AND COALESCE(p.paid_at, p.updated_at, p.created_at) >= now() - interval '48 hours'
 ), selected AS (
   SELECT * FROM candidates ORDER BY event_at DESC, payment_id DESC LIMIT %d
@@ -83,17 +85,17 @@ SELECT json_build_object(
     WHERE c.id IN (SELECT channel_id FROM selected))
 )::text;
 COMMIT;
-""" % limit
+""" % (payment_filter, limit)
 
 
-def read_snapshot(limit=DEFAULT_LIMIT):
+def read_snapshot(limit=DEFAULT_LIMIT, unsettled=False):
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LIMIT:
         raise ReconcileFailure("invalid_limit")
     try:
         result = subprocess.run(
             ["docker", "exec", "-i", "dujiaonext-postgres", "sh", "-c",
              'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -qAt -v ON_ERROR_STOP=1'],
-            input=_query_sql(limit), text=True, capture_output=True,
+            input=_query_sql(limit, unsettled), text=True, capture_output=True,
             check=True, timeout=25,
         )
         snapshot = json.loads(result.stdout)
@@ -270,8 +272,52 @@ def validate_reply(status, body, expected):
     return "matched", "matched", False
 
 
+def _unsettled_request_config(payment, config):
+    # Redirect payments have a placeholder provider_ref until the first callback.
+    # Discover by the unique, stored gateway_order_no, never a reused business ID.
+    candidate = dict(payment, provider_ref=payment.get("out_trade_no"))
+    host, port, path, _body, *expected = _request_config(candidate, config)
+    body = urlencode({"pid": expected[0], "key": config["merchant_key"],
+                      "out_trade_no": expected[2]}).encode("utf-8")
+    return host, port, path, body, *expected
+
+
+def validate_unsettled_reply(status, body, expected):
+    # This is read-only monitoring; discovering a receipt never credits a wallet
+    # or releases goods. Only exact merchant/order/amount/currency bindings count.
+    if status != 200 or len(body) > MAX_RESPONSE_BYTES:
+        return validate_reply(status, body, expected)
+    try:
+        reply = json.loads(body, parse_float=decimal.Decimal, object_pairs_hook=_unique_object)
+    except (ValueError, TypeError, UnicodeError):
+        return "error", "response_invalid_json", False
+    if not isinstance(reply, dict):
+        return "error", "response_invalid_shape", False
+    if (_scalar(reply.get("code")) == "-1" and
+            _scalar(reply.get("msg")) in ("订单不存在", "订单不存在！", "订单不存在!")):
+        return "matched", "gateway_order_missing", False
+    if _scalar(reply.get("code")) != "1":
+        return validate_reply(status, body, expected)
+    paid_status = _scalar(reply.get("status"))
+    if paid_status not in ("0", "1"):
+        return "error", "response_invalid_status", False
+    ref = _scalar(reply.get("trade_no"))
+    if not ref:
+        return "error", "response_missing_required_field", False
+    bindings = list(expected)
+    bindings[1] = ref
+    # Validate amount and all identities even for an unpaid response.
+    validated_reply = dict(reply, status=1)
+    outcome, reason, stop = validate_reply(status, json.dumps(validated_reply, default=str).encode(), bindings)
+    if outcome != "matched":
+        return outcome, reason, stop
+    if paid_status == "1":
+        return "mismatch", "gateway_paid_local_unsettled", False
+    return "matched", "gateway_not_paid", False
+
+
 def reconcile_snapshot(snapshot, limit=DEFAULT_LIMIT, budget_seconds=DEFAULT_BUDGET_SECONDS,
-                       request=request_gateway, clock=time.monotonic):
+                       request=request_gateway, clock=time.monotonic, unsettled=False):
     started = clock()
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LIMIT or not 0 < budget_seconds <= 300:
         raise ReconcileFailure("invalid_limits")
@@ -293,10 +339,12 @@ def reconcile_snapshot(snapshot, limit=DEFAULT_LIMIT, budget_seconds=DEFAULT_BUD
         stop = False
         try:
             config = channels.get(str(payment.get("channel_id")))
-            host, port, path, body, *expected = _request_config(payment, config)
+            build_request = _unsettled_request_config if unsettled else _request_config
+            host, port, path, body, *expected = build_request(payment, config)
             counts["requests"] += 1
             status, reply = request(host, port, path, body, min(REQUEST_TIMEOUT_SECONDS, remaining))
-            outcome, reason, stop = validate_reply(status, reply, expected)
+            validator = validate_unsettled_reply if unsettled else validate_reply
+            outcome, reason, stop = validator(status, reply, expected)
         except ReconcileFailure as error:
             outcome, reason = "error", str(error)
         except Exception:
@@ -321,6 +369,7 @@ def reconcile_snapshot(snapshot, limit=DEFAULT_LIMIT, budget_seconds=DEFAULT_BUD
     mismatch_findings = [entry for entry in findings if entry["reason"] in {
         "merchant_mismatch", "provider_reference_mismatch", "merchant_order_mismatch",
         "gateway_not_paid", "amount_mismatch", "currency_mismatch",
+        "gateway_paid_local_unsettled",
     }]
     error_findings = [entry for entry in findings if entry not in mismatch_findings]
     return {
@@ -341,9 +390,9 @@ def reconcile_snapshot(snapshot, limit=DEFAULT_LIMIT, budget_seconds=DEFAULT_BUD
     }
 
 
-def reconcile_recent(limit=DEFAULT_LIMIT, budget_seconds=DEFAULT_BUDGET_SECONDS):
+def reconcile_recent(limit=DEFAULT_LIMIT, budget_seconds=DEFAULT_BUDGET_SECONDS, unsettled=False):
     try:
-        return reconcile_snapshot(read_snapshot(limit), limit, budget_seconds)
+        return reconcile_snapshot(read_snapshot(limit, unsettled), limit, budget_seconds, unsettled=unsettled)
     except Exception:
         return {
             "status": "failed", "window_hours": 48, "incomplete": True,
