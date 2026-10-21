@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"errors"
+	"time"
 
 	jobconsumer "github.com/dujiao-next/internal/app/jobs/consumer"
 	"github.com/dujiao-next/internal/config"
@@ -51,6 +52,16 @@ func NewService(cfg *config.QueueConfig, consumer *jobconsumer.Consumer) (*Servi
 func registerPeriodicTasks(scheduler *asynq.Scheduler, consumer *jobconsumer.Consumer, cfg *config.QueueConfig) {
 	if scheduler == nil || consumer == nil {
 		return
+	}
+	if consumer.PaymentService != nil {
+		_, err := scheduler.Register("@every 10s", queue.NewPaymentReceiptPollTask(),
+			asynq.Queue(queue.DefaultQueue), asynq.Unique(10*time.Second),
+			asynq.Timeout(15*time.Second), asynq.MaxRetry(0))
+		if err != nil {
+			logger.Warnw("scheduler_register_payment_receipt_poll_failed", "error", err)
+		} else {
+			logger.Infow("scheduler_register_payment_receipt_poll_ok", "interval", "10s")
+		}
 	}
 	if consumer.AffiliateService != nil {
 		task := queue.NewAffiliateConfirmCommissionsTask()

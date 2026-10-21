@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	paymentcontract "github.com/dujiao-next/internal/modules/payment/contract"
 
@@ -45,6 +47,9 @@ func (s *PaymentService) CapturePayment(input CapturePaymentInput) (*paymentdoma
 	}
 
 	providerType := strings.ToLower(strings.TrimSpace(channel.ProviderType))
+	if providerType == constants.PaymentProviderEpay {
+		return s.captureEpayReceipt(input.Context, payment, channel)
+	}
 	if providerType != constants.PaymentProviderOfficial {
 		return nil, ErrPaymentProviderNotSupported
 	}
@@ -137,4 +142,143 @@ func mapProviderErrorToService(err error) error {
 	default:
 		return fmt.Errorf("%w: %v", ErrPaymentGatewayRequestFailed, err)
 	}
+}
+
+// acquireReceiptQuery bounds per-payment polling and memory even when multiple
+// browser tabs and the compensation worker ask for the same receipt together.
+func (s *PaymentService) acquireReceiptQuery(id uint, now time.Time) (func(), bool) {
+	s.receiptQueryMu.Lock()
+	defer s.receiptQueryMu.Unlock()
+	if s.receiptQueryInFlight[id] || now.Before(s.receiptQueryNext[id]) {
+		return nil, false
+	}
+	if s.receiptQueryNext == nil {
+		s.receiptQueryNext = make(map[uint]time.Time)
+		s.receiptQueryInFlight = make(map[uint]bool)
+	}
+	if len(s.receiptQueryNext) >= 1000 {
+		for key, until := range s.receiptQueryNext {
+			if !s.receiptQueryInFlight[key] && !now.Before(until) {
+				delete(s.receiptQueryNext, key)
+				delete(s.receiptQueryInFlight, key)
+			}
+		}
+		if len(s.receiptQueryNext) >= 1000 {
+			return nil, false
+		}
+	}
+	s.receiptQueryInFlight[id] = true
+	s.receiptQueryNext[id] = now.Add(3 * time.Second)
+	return func() {
+		s.receiptQueryMu.Lock()
+		delete(s.receiptQueryInFlight, id)
+		s.receiptQueryMu.Unlock()
+	}, true
+}
+
+func (s *PaymentService) captureEpayReceipt(ctx context.Context, payment *paymentdomain.Payment, channel *paymentdomain.PaymentChannel) (*paymentdomain.Payment, error) {
+	// Never revisit canceled/expired/manual-resolution records automatically.
+	if payment.Status != constants.PaymentStatusPending {
+		return payment, nil
+	}
+	if payment.ProviderType != constants.PaymentProviderEpay || !channel.IsActive || strings.TrimSpace(payment.GatewayOrderNo) == "" {
+		return payment, nil
+	}
+	if s.paymentProviderRegistry == nil {
+		return nil, ErrPaymentProviderNotSupported
+	}
+	provider, ok := s.paymentProviderRegistry.Lookup(channel.ProviderType, channel.ChannelType)
+	if !ok {
+		return nil, ErrPaymentProviderNotSupported
+	}
+	lookup, ok := provider.(paymentcontract.GatewayReceiptLookup)
+	if !ok {
+		return nil, ErrPaymentProviderNotSupported
+	}
+	release, acquired := s.acquireReceiptQuery(payment.ID, time.Now())
+	if !acquired {
+		return s.GetPayment(payment.ID)
+	}
+	defer release()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result, err := lookup.LookupReceipt(queryCtx, channel.ConfigJSON, payment.GatewayOrderNo, payment.Amount, payment.Currency)
+	if err != nil {
+		return nil, mapProviderErrorToService(err)
+	}
+	if result == nil {
+		return nil, ErrPaymentGatewayResponseInvalid
+	}
+	if result.Status == constants.PaymentStatusPending {
+		return s.GetPayment(payment.ID)
+	}
+	if result.Status != constants.PaymentStatusSuccess || strings.TrimSpace(result.ProviderRef) == "" ||
+		!result.Amount.Decimal.IsPositive() || !result.Amount.Decimal.Equal(payment.Amount.Decimal) ||
+		strings.TrimSpace(result.Currency) == "" || !strings.EqualFold(result.Currency, payment.Currency) {
+		return nil, ErrPaymentCallbackUnverified
+	}
+	return s.HandleCallback(PaymentCallbackInput{
+		PaymentID: payment.ID, ChannelID: channel.ID, OrderNo: payment.GatewayOrderNo,
+		Status: constants.PaymentStatusSuccess, ProviderRef: result.ProviderRef,
+		Amount: result.Amount, Currency: result.Currency, PaidAt: result.PaidAt,
+		Payload: jsonmap.JSON{"gateway_order_verified": true, "gateway_order_verified_at": time.Now().UTC().Format(time.RFC3339), "receipt_source": "active_query"},
+	})
+}
+
+// ReconcilePendingReceipts provides a bounded, rotating server-side fallback.
+// All gateway I/O happens before the existing locked/idempotent settlement path.
+func (s *PaymentService) ReconcilePendingReceipts(ctx context.Context) error {
+	if !s.receiptSweepMu.TryLock() {
+		return nil
+	}
+	defer s.receiptSweepMu.Unlock()
+	reader, ok := s.paymentRepo.(paymentcontract.PendingReceiptStore)
+	if !ok {
+		return ErrPaymentProviderNotSupported
+	}
+	payments, err := reader.ListPendingReceiptPayments(s.receiptSweepCursor, 20, time.Now())
+	if err != nil {
+		return ErrPaymentUpdateFailed
+	}
+	if len(payments) == 0 && s.receiptSweepCursor != 0 {
+		s.receiptSweepCursor = 0
+		payments, err = reader.ListPendingReceiptPayments(0, 20, time.Now())
+		if err != nil {
+			return ErrPaymentUpdateFailed
+		}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	workers := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for _, payment := range payments {
+		select {
+		case workers <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return nil
+		}
+		s.receiptSweepCursor = payment.ID
+		wg.Add(1)
+		go func(id uint) {
+			defer wg.Done()
+			defer func() { <-workers }()
+			defer func() {
+				if recover() != nil {
+					paymentLogger("payment_id", id).Errorw("payment_receipt_poll_panicked")
+				}
+			}()
+			if _, err := s.CapturePayment(CapturePaymentInput{PaymentID: id, Context: ctx}); err != nil {
+				paymentLogger("payment_id", id).Warnw("payment_receipt_poll_failed", "error", err)
+			}
+		}(payment.ID)
+	}
+	wg.Wait()
+	return nil
 }

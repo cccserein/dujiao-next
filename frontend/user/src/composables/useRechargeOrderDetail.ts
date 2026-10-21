@@ -185,6 +185,7 @@ export function useRechargeOrderDetail() {
   }
 
   const checkPayment = async () => {
+    if (checkingPayment.value) return
     const paymentID = Number(payment.value?.id || payment.value?.payment_id || 0)
     if (!Number.isFinite(paymentID) || paymentID <= 0) return
     checkingPayment.value = true
@@ -202,8 +203,11 @@ export function useRechargeOrderDetail() {
 
   const startPolling = () => {
     if (!isPending.value || pollTimer.value) return
-    pollTimer.value = window.setInterval(() => {
-      void refreshStatus(true)
+    pollTimer.value = window.setInterval(async () => {
+      if (String(payment.value?.provider_type || '').toLowerCase() === 'epay') {
+        await checkPayment()
+      }
+      await refreshStatus(true)
     }, 5000)
   }
 

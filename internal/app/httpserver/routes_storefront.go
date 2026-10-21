@@ -99,6 +99,13 @@ func registerStorefrontRoutes(
 		ordertransport.RegisterGuestCreateAndPayRoute(guestWrite, orderCreateHandler)
 		paymenttransport.RegisterGuestWriteRoutes(guestWrite, paymentWriteHandler)
 	}
+	// Preserve the same per-IP limit, with an independent bucket so polling
+	// cannot consume the customer's order-creation allowance.
+	guestCaptureRule := guestWriteRule
+	guestCaptureRule.Prefix += ":capture"
+	guestCapture := guest.Group("")
+	guestCapture.Use(middleware.RateLimitMiddleware(redisClient, guestCaptureRule, middleware.KeyByIP))
+	paymenttransport.RegisterGuestCaptureRoute(guestCapture, paymentWriteHandler)
 
 	// 注册 / 忘记密码 / 发送验证码：按 IP 计数，共享出口 IP（NAT）下一次完整流程就要 2~4 次请求，
 	// 不能照搬登录的 5 次/封 15 分钟，否则同网用户会被成批误封。

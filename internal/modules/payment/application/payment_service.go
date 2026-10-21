@@ -2,6 +2,8 @@ package application
 
 import (
 	"errors"
+	"sync"
+	"time"
 
 	"github.com/dujiao-next/internal/config"
 	"github.com/dujiao-next/internal/logger"
@@ -67,6 +69,11 @@ type PaymentService struct {
 	memberLevelSvc          MemberLevelProgressor
 	paymentProviderRegistry paymentcontract.GatewayRegistry
 	resellerAccounting      resellerAccountingTransactions
+	receiptSweepMu          sync.Mutex
+	receiptSweepCursor      uint
+	receiptQueryMu          sync.Mutex
+	receiptQueryNext        map[uint]time.Time
+	receiptQueryInFlight    map[uint]bool
 }
 
 type MemberLevelProgressor interface {

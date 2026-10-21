@@ -58,6 +58,7 @@ var (
 	ErrSignatureGenerate = errors.New("epay signature generate failed")
 	ErrSignatureInvalid  = errors.New("epay signature invalid")
 	ErrQueryUnsupported  = errors.New("epay query unsupported")
+	ErrQueryOrderMissing = errors.New("epay query order missing")
 )
 
 // Config 易支付配置
@@ -371,6 +372,16 @@ type QueryResult struct {
 // QueryOrder queries the exact gateway attempt, never the latest attempt under
 // a reused merchant order number. Both identifiers must match the reply.
 func QueryOrder(ctx context.Context, cfg *Config, outTradeNo, providerRef string) (*QueryResult, error) {
+	return queryOrder(ctx, cfg, outTradeNo, providerRef, false)
+}
+
+// QueryOrderByMerchantNo is only for a unique local payment's gateway_order_no.
+// Callback corroboration must continue using QueryOrder's exact trade reference.
+func QueryOrderByMerchantNo(ctx context.Context, cfg *Config, outTradeNo string) (*QueryResult, error) {
+	return queryOrder(ctx, cfg, outTradeNo, "", true)
+}
+
+func queryOrder(ctx context.Context, cfg *Config, outTradeNo, providerRef string, byMerchantOrder bool) (*QueryResult, error) {
 	if cfg == nil {
 		return nil, ErrConfigInvalid
 	}
@@ -384,7 +395,7 @@ func QueryOrder(ctx context.Context, cfg *Config, outTradeNo, providerRef string
 		return nil, ErrConfigInvalid
 	}
 	orderNo, tradeNo := strings.TrimSpace(outTradeNo), strings.TrimSpace(providerRef)
-	if orderNo == "" || tradeNo == "" {
+	if orderNo == "" || (!byMerchantOrder && tradeNo == "") {
 		return nil, ErrConfigInvalid
 	}
 	currency, err := ConfiguredCurrency(cfg)
@@ -405,6 +416,10 @@ func QueryOrder(ctx context.Context, cfg *Config, outTradeNo, providerRef string
 	}
 	endpoint := buildEndpoint(base.String(), queryPath) + "?act=order"
 	values := url.Values{"pid": {strings.TrimSpace(cfg.MerchantID)}, "key": {cfg.MerchantKey}, "trade_no": {tradeNo}}
+	if byMerchantOrder {
+		values.Del("trade_no")
+		values.Set("out_trade_no", orderNo)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(values.Encode()))
 	if err != nil {
 		return nil, ErrConfigInvalid
@@ -437,8 +452,15 @@ func QueryOrder(ctx context.Context, cfg *Config, outTradeNo, providerRef string
 	if err != nil {
 		return nil, err
 	}
+	if byMerchantOrder && queryScalar(payload["code"]) == "-1" {
+		switch queryScalar(payload["msg"]) {
+		case "订单不存在", "订单不存在！", "订单不存在!":
+			return nil, ErrQueryOrderMissing
+		}
+	}
+	actualTradeNo := queryScalar(payload["trade_no"])
 	if queryScalar(payload["code"]) != "1" || queryScalar(payload["pid"]) != strings.TrimSpace(cfg.MerchantID) ||
-		queryScalar(payload["out_trade_no"]) != orderNo || queryScalar(payload["trade_no"]) != tradeNo {
+		queryScalar(payload["out_trade_no"]) != orderNo || actualTradeNo == "" || (!byMerchantOrder && actualTradeNo != tradeNo) {
 		return nil, ErrResponseInvalid
 	}
 	status, err := parseQueryStatus(payload["status"])
@@ -452,7 +474,7 @@ func QueryOrder(ctx context.Context, cfg *Config, outTradeNo, providerRef string
 	if rawCurrency, present := payload["currency"]; present && strings.ToUpper(queryScalar(rawCurrency)) != currency {
 		return nil, ErrResponseInvalid
 	}
-	return &QueryResult{Code: 1, TradeNo: tradeNo, OutTradeNo: orderNo, Money: amount, Status: status, Currency: currency}, nil
+	return &QueryResult{Code: 1, TradeNo: actualTradeNo, OutTradeNo: orderNo, Money: amount, Status: status, Currency: currency}, nil
 }
 
 // ParseAmount rejects empty/non-positive values, exponents, excessive input and

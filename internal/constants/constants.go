@@ -385,6 +385,7 @@ const (
 	TaskOrderAutoFulfill            = "order:auto_fulfill"
 	TaskOrderTimeoutCancel          = "order:timeout_cancel"
 	TaskWalletRechargeExpire        = "wallet_recharge:timeout_expire"
+	TaskPaymentReceiptPoll          = "payment:receipt_poll"
 	TaskNotificationDispatch        = "notification:dispatch"
 	TaskAffiliateConfirmCommissions = "affiliate:confirm_commissions"
 	TaskAffiliateOrderPaid          = "affiliate:order_paid"

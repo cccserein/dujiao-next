@@ -35,6 +35,11 @@ type ChannelStore interface {
 	List(filter ChannelListFilter) ([]paymentdomain.PaymentChannel, int64, error)
 }
 
+// PendingReceiptStore supplies a bounded cursor scan for callback compensation.
+type PendingReceiptStore interface {
+	ListPendingReceiptPayments(afterID uint, limit int, now time.Time) ([]paymentdomain.Payment, error)
+}
+
 // Transaction 复用订单工作单元的全部领域端口，并追加支付聚合。
 // 应用层只接触端口，不感知 GORM 事务句柄。
 type Transaction interface {

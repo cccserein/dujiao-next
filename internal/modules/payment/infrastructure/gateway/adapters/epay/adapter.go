@@ -26,8 +26,8 @@ import (
 // epay 没有异步 JSON webhook，callback 是同步 form POST，所以**不**实现
 // paymentcontract.GatewayWebhooker；
 // 它支持 v1 的 api.php?act=order 主动查询，用于在放行回调前复核真实收款，
-// 因此实现 CallbackCorroborator（而非 GatewayCapturer：capture 语义只服务于
-// official 渠道的"主动捕获"流程）。
+// CallbackCorroborator 按流水复核回调；GatewayReceiptLookup 按唯一商户支付单号
+// 查收款结果，为漏回调提供主动补查。
 type epayAdapter struct{}
 
 // NewEpayAdapter 实例化 epay adapter。
@@ -38,6 +38,7 @@ var (
 	_ paymentcontract.GatewayProvider         = (*epayAdapter)(nil)
 	_ paymentcontract.GatewayCallbackVerifier = (*epayAdapter)(nil)
 	_ paymentcontract.CallbackCorroborator    = (*epayAdapter)(nil)
+	_ paymentcontract.GatewayReceiptLookup    = (*epayAdapter)(nil)
 )
 
 // Type 返回 provider 标识。

@@ -24,6 +24,13 @@ func RegisterGuestWriteRoutes(guest gin.IRoutes, handler *WriteHandler) {
 		panic("payment guest write routes: required dependency is nil")
 	}
 	guest.POST("/payments", handler.CreateGuestPayment)
+}
+
+// RegisterGuestCaptureRoute keeps receipt polling out of the order-creation budget.
+func RegisterGuestCaptureRoute(guest gin.IRoutes, handler *WriteHandler) {
+	if guest == nil || handler == nil {
+		panic("payment guest capture route: required dependency is nil")
+	}
 	guest.POST("/payments/:id/capture", handler.CaptureGuestPayment)
 }
 

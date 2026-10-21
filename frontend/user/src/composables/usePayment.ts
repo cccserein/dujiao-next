@@ -661,7 +661,8 @@ export function usePayment() {
   const shouldCaptureCurrentPayment = () => {
     if (!currentPaymentID()) return false
     if (!order.value || order.value.status !== 'pending_payment') return false
-    return paymentProviderType.value === 'official' && paymentChannelType.value === 'wechat'
+    return paymentProviderType.value === 'epay' ||
+      (paymentProviderType.value === 'official' && paymentChannelType.value === 'wechat')
   }
 
   const captureCurrentPayment = async (options?: { silent?: boolean }) => {

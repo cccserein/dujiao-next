@@ -88,6 +88,14 @@ type GatewayCapturer interface {
 	QueryPayment(ctx context.Context, cfg jsonmap.JSON, providerRef string) (*GatewayQueryResult, error)
 }
 
+// GatewayReceiptLookup discovers a receipt by a unique creation-time merchant
+// payment number when a callback (and therefore the provider reference) is missing.
+// Implementations must bind merchant, order number, positive amount and currency.
+type GatewayReceiptLookup interface {
+	GatewayProvider
+	LookupReceipt(ctx context.Context, cfg jsonmap.JSON, orderNo string, amount money.Amount, currency string) (*GatewayQueryResult, error)
+}
+
 type GatewayWebhooker interface {
 	GatewayProvider
 	ParseWebhook(ctx context.Context, cfg jsonmap.JSON, headers map[string]string, body []byte, now time.Time) (*GatewayCallbackResult, error)
