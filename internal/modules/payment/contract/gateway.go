@@ -13,6 +13,10 @@ import (
 // 因此无法对"支付成功"回调做二次核实。
 var ErrGatewayCorroborationUnsupported = errors.New("gateway corroboration unsupported")
 
+// ErrGatewayPaymentWindowClosed means the remaining order lifetime cannot fit
+// the gateway's minimum payment window without extending the order deadline.
+var ErrGatewayPaymentWindowClosed = errors.New("gateway payment window closed")
+
 // GatewayPayloadFiatCurrencySent 标记创建支付时实际提交给网关的法币币种。
 // 回调兼容逻辑用它区分具备新版事实快照的支付与升级前创建的在途支付。
 const GatewayPayloadFiatCurrencySent = "_dujiao_next_fiat_currency_sent"
@@ -31,6 +35,7 @@ type GatewayCreateInput struct {
 	ReturnURLQuery map[string]string
 	ClientIP       string
 	ChannelType    string
+	ExpiresAt      *time.Time
 	Extra          jsonmap.JSON
 }
 

@@ -22,6 +22,12 @@ func TestRespondPaymentCreateError(t *testing.T) {
 		msg  string
 	}{
 		{
+			name: "insufficient payment window",
+			err:  ErrPaymentWindowClosed,
+			code: response.CodeBadRequest,
+			msg:  "订单剩余付款时间不足，请重新下单",
+		},
+		{
 			name: "gateway response invalid",
 			err:  ErrPaymentGatewayResponseInvalid,
 			code: response.CodeBadRequest,

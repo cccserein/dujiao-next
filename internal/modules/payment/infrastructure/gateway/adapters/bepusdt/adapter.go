@@ -117,6 +117,7 @@ func (a *bepusdtAdapter) CreatePayment(ctx context.Context, raw jsonmap.JSON, in
 		Name:      input.Subject,
 		NotifyURL: input.NotifyURL,
 		ReturnURL: returnURL,
+		ExpiresAt: input.ExpiresAt,
 	}
 	mode, _ := input.Extra["interaction_mode"].(string)
 	mode = strings.ToLower(strings.TrimSpace(mode))
@@ -322,6 +323,8 @@ func mapBepusdtError(err error) error {
 		return nil
 	}
 	switch {
+	case errors.Is(err, bepusdt.ErrPaymentWindowClosed):
+		return paymentcontract.ErrGatewayPaymentWindowClosed
 	case errors.Is(err, bepusdt.ErrConfigInvalid):
 		return fmt.Errorf("%w: %v", paymentcontract.ErrGatewayConfigInvalid, err)
 	case errors.Is(err, bepusdt.ErrTradeTypeNotSupport):

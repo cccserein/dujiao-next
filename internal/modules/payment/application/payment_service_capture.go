@@ -131,6 +131,8 @@ func mapProviderErrorToService(err error) error {
 		return nil
 	}
 	switch {
+	case errors.Is(err, paymentcontract.ErrGatewayPaymentWindowClosed):
+		return ErrPaymentWindowClosed
 	case errors.Is(err, paymentcontract.ErrGatewayConfigInvalid):
 		return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
 	case errors.Is(err, paymentcontract.ErrGatewayRequestFailed), errors.Is(err, paymentcontract.ErrGatewayAuthFailed):

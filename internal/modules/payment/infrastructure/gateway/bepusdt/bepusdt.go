@@ -25,6 +25,7 @@ var (
 	ErrResponseInvalid     = errors.New("bepusdt response invalid")
 	ErrSignatureInvalid    = errors.New("bepusdt signature invalid")
 	ErrTradeTypeNotSupport = errors.New("bepusdt trade type not supported")
+	ErrPaymentWindowClosed = errors.New("bepusdt payment window closed")
 )
 
 // 订单状态常量
@@ -76,6 +77,7 @@ type CreateInput struct {
 	Name      string
 	NotifyURL string
 	ReturnURL string
+	ExpiresAt *time.Time
 }
 
 // CreateResult 创建订单结果
@@ -220,6 +222,9 @@ func CreatePayment(ctx context.Context, cfg *Config, input CreateInput) (*Create
 	if cfg.Address != "" {
 		params["address"] = cfg.Address
 	}
+	if err := setPaymentTimeout(params, input.ExpiresAt); err != nil {
+		return nil, err
+	}
 
 	// 生成签名
 	signature := Sign(params, cfg.AuthToken)
@@ -250,6 +255,9 @@ func CreatePayment(ctx context.Context, cfg *Config, input CreateInput) (*Create
 	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("%w: %s", ErrResponseInvalid, resp.Message)
+	}
+	if err := validatePaymentExpiration(input.ExpiresAt, resp.Data.ExpirationTime); err != nil {
+		return nil, err
 	}
 
 	var raw map[string]interface{}
@@ -302,6 +310,9 @@ func CreateCashierOrder(ctx context.Context, cfg *Config, input CreateInput) (*C
 	if cfg.Currencies != "" {
 		params["currencies"] = cfg.Currencies
 	}
+	if err := setPaymentTimeout(params, input.ExpiresAt); err != nil {
+		return nil, err
+	}
 
 	signature := Sign(params, cfg.AuthToken)
 	params["signature"] = signature
@@ -331,6 +342,9 @@ func CreateCashierOrder(ctx context.Context, cfg *Config, input CreateInput) (*C
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("%w: %s", ErrResponseInvalid, resp.Message)
 	}
+	if err := validatePaymentExpiration(input.ExpiresAt, resp.Data.ExpirationTime); err != nil {
+		return nil, err
+	}
 
 	var raw map[string]interface{}
 	_ = json.Unmarshal(respBytes, &raw)
@@ -342,6 +356,35 @@ func CreateCashierOrder(ctx context.Context, cfg *Config, input CreateInput) (*C
 		PaymentURL: resp.Data.PaymentURL,
 		Raw:        raw,
 	}, nil
+}
+
+// Reserve the complete HTTP request timeout so the gateway's relative timeout
+// cannot outlast the local absolute deadline because of network latency.
+// Both gateway modes accept at least 180 seconds; never round a short window up.
+func setPaymentTimeout(params map[string]interface{}, expiresAt *time.Time) error {
+	if expiresAt == nil {
+		return nil
+	}
+	remaining := int(time.Until(*expiresAt)/time.Second) - 15
+	if remaining < 180 {
+		return ErrPaymentWindowClosed
+	}
+	params["timeout"] = remaining
+	return nil
+}
+
+func validatePaymentExpiration(expiresAt *time.Time, remainingSeconds int) error {
+	if expiresAt == nil {
+		return nil
+	}
+	// The gateway rounds down its remaining seconds. Include that fractional
+	// second and reject ignored/clamped timeout values before exposing a pay URL.
+	remaining := time.Until(*expiresAt)
+	if remainingSeconds <= 0 || remaining <= 0 ||
+		int64(remainingSeconds) >= int64(remaining/time.Second) {
+		return fmt.Errorf("%w: payment expiration exceeds order deadline", ErrResponseInvalid)
+	}
+	return nil
 }
 
 // VerifyCallback 验证回调签名

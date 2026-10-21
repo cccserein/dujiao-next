@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	paymentcontract "github.com/dujiao-next/internal/modules/payment/contract"
 
@@ -16,6 +17,81 @@ import (
 	"github.com/dujiao-next/internal/shared/money"
 	"github.com/shopspring/decimal"
 )
+
+func TestBepusdtAdapterPaymentDeadline(t *testing.T) {
+	for _, mode := range []string{"cashier", "transaction"} {
+		for _, replyMode := range []string{"bounded", "default_20_minutes", "missing_expiration", "negative_expiration"} {
+			t.Run(mode+"/"+replyMode, func(t *testing.T) {
+				deadline := time.Now().Add(10 * time.Minute)
+				cfg := validBepusdtConfig("")
+				cfg["order_mode"] = mode
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var params map[string]interface{}
+					if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+						t.Error(err)
+						w.WriteHeader(400)
+						return
+					}
+					timeout, ok := params["timeout"].(float64)
+					if !ok || timeout < 570 || timeout > 585 || time.Now().Add(time.Duration(timeout)*time.Second).After(deadline) {
+						t.Errorf("gateway timeout exceeds remaining order lifetime: %v", params["timeout"])
+					}
+					if params["signature"] != bepusdt.Sign(params, cfg["auth_token"].(string)) {
+						t.Error("timeout must be included in the signed request")
+					}
+					remaining := int(timeout) - 1
+					switch replyMode {
+					case "default_20_minutes":
+						remaining = 1200
+					case "missing_expiration":
+						remaining = 0
+					case "negative_expiration":
+						remaining = -1
+					}
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"status_code": 200, "data": map[string]interface{}{
+						"trade_id": "sandbox-trade", "order_id": params["order_id"], "amount": "28.88",
+						"expiration_time": remaining, "payment_url": "https://sandbox.invalid/checkout",
+					}})
+				}))
+				defer server.Close()
+				cfg["gateway_url"] = server.URL
+				result, err := NewBepusdtAdapter().CreatePayment(context.Background(), cfg, paymentcontract.GatewayCreateInput{
+					OrderNo: "sandbox-order", Amount: money.FromDecimal(decimal.RequireFromString("28.88")), ExpiresAt: &deadline,
+				})
+				if replyMode == "bounded" {
+					if err != nil || result == nil || result.RedirectURL == "" {
+						t.Fatalf("bounded checkout rejected: %v", err)
+					}
+				} else if result != nil || !errors.Is(err, paymentcontract.ErrGatewayResponseInvalid) {
+					t.Fatalf("unsafe checkout exposed: result=%v err=%v", result, err)
+				}
+			})
+		}
+	}
+}
+
+func TestBepusdtAdapterRejectsShortPaymentWindowBeforeGatewayRequest(t *testing.T) {
+	for _, mode := range []string{"cashier", "transaction"} {
+		for _, remaining := range []time.Duration{-time.Second, time.Second, 120 * time.Second, 180 * time.Second, 194 * time.Second} {
+			t.Run(mode+"/"+remaining.String(), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					t.Error("near-expiry order must not create a new gateway payment")
+					w.WriteHeader(500)
+				}))
+				defer server.Close()
+				cfg := validBepusdtConfig(server.URL)
+				cfg["order_mode"] = mode
+				deadline := time.Now().Add(remaining)
+				result, err := NewBepusdtAdapter().CreatePayment(context.Background(), cfg, paymentcontract.GatewayCreateInput{
+					OrderNo: "sandbox-expiring", Amount: money.FromDecimal(decimal.NewFromInt(35)), ExpiresAt: &deadline,
+				})
+				if result != nil || !errors.Is(err, paymentcontract.ErrGatewayPaymentWindowClosed) {
+					t.Fatalf("result=%v err=%v", result, err)
+				}
+			})
+		}
+	}
+}
 
 func TestBepusdtAdapter_Type(t *testing.T) {
 	a := NewBepusdtAdapter()

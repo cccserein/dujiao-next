@@ -579,9 +579,11 @@ func TestPaymentDisplayChannelTypeLifecycle(t *testing.T) {
 func TestApplyProviderPaymentUsesGatewayOrderNoForBepusdt(t *testing.T) {
 	svc, db := setupPaymentServiceWalletTest(t)
 	now := time.Now()
+	deadline := now.Add(10 * time.Minute)
 
 	order := &orderdomain.Order{
 		OrderNo:                 "DJTESTGATEWAY001",
+		ExpiresAt:               &deadline,
 		UserID:                  1,
 		Status:                  constants.OrderStatusPendingPayment,
 		Currency:                "CNY",
@@ -608,7 +610,14 @@ func TestApplyProviderPaymentUsesGatewayOrderNoForBepusdt(t *testing.T) {
 		}
 		gotOrderID = strings.TrimSpace(payload["order_id"].(string))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status_code":200,"message":"ok","data":{"trade_id":"TRX-1001","order_id":"` + gotOrderID + `","amount":"50.00","actual_amount":"7.00","token":"USDT","expiration_time":1800,"payment_url":"https://pay.example.com/checkout"}}`))
+		timeout, ok := payload["timeout"].(float64)
+		if !ok || timeout < 570 || timeout > 585 {
+			t.Errorf("persisted order deadline not propagated: timeout=%v", payload["timeout"])
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"status_code": 200, "data": map[string]interface{}{
+			"trade_id": "TRX-1001", "order_id": gotOrderID, "amount": "50.00", "actual_amount": "7.00", "token": "USDT",
+			"expiration_time": int(timeout) - 1, "payment_url": "https://pay.example.com/checkout",
+		}})
 	}))
 	defer server.Close()
 

@@ -29,6 +29,7 @@ var (
 	ErrPaymentChannelConfigInvalid         = errors.New("payment channel config invalid")
 	ErrPaymentGatewayRequestFailed         = errors.New("payment gateway request failed")
 	ErrPaymentGatewayResponseInvalid       = errors.New("payment gateway response invalid")
+	ErrPaymentWindowClosed                 = errors.New("payment window closed")
 	ErrPaymentCurrencyMismatch             = errors.New("payment currency mismatch")
 	ErrWalletNotSupportedForGuest          = errors.New("wallet not supported for guest")
 	ErrPaymentChannelNotAllowedForProduct  = errors.New("payment channel not allowed for product")
@@ -337,6 +338,7 @@ var paymentProviderGatewayErrorRules = []mappedError{
 var paymentCreateErrorRules = concatMappedErrors(
 	[]mappedError{
 		{target: ErrPaymentInvalid, code: response.CodeBadRequest, key: "error.payment_invalid"},
+		{target: ErrPaymentWindowClosed, code: response.CodeBadRequest, key: "error.payment_window_closed"},
 		{target: ErrOrderNotFound, code: response.CodeNotFound, key: "error.order_not_found"},
 		{target: ErrOrderStatusInvalid, code: response.CodeBadRequest, key: "error.order_status_invalid"},
 		{target: ErrPaymentChannelNotFound, code: response.CodeNotFound, key: "error.payment_channel_not_found"},

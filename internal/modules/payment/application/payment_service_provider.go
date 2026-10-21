@@ -170,6 +170,7 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *o
 		Email:          strings.TrimSpace(customerEmail),
 		ClientIP:       strings.TrimSpace(input.ClientIP),
 		ChannelType:    channel.ChannelType,
+		ExpiresAt:      order.ExpiresAt,
 		Extra:          extra,
 		ReturnURLQuery: returnURLQuery,
 		// 分销站/自定义域名下单时按当前 tenant 域名生成 ReturnURL（主站为空，
