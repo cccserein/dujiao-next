@@ -1,6 +1,7 @@
 package application
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
 	paymentcontract "github.com/dujiao-next/internal/modules/payment/contract"
 	paymentdomain "github.com/dujiao-next/internal/modules/payment/domain"
+	walletcontract "github.com/dujiao-next/internal/modules/wallet/contract"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/shared/jsonmap"
@@ -96,20 +98,6 @@ func (s *PaymentService) HandleCallback(input PaymentCallbackInput) (*paymentdom
 		return nil, err
 	}
 
-	// 幂等处理：已成功的不再回退状态
-	if payment.Status == constants.PaymentStatusSuccess {
-		log.Infow("payment_callback_idempotent_success",
-			"current_status", payment.Status,
-		)
-		return s.updateCallbackMeta(payment, constants.PaymentStatusSuccess, input)
-	}
-	if payment.Status == status {
-		log.Infow("payment_callback_idempotent_same_status",
-			"current_status", payment.Status,
-		)
-		return s.updateCallbackMeta(payment, status, input)
-	}
-
 	previousStatus := payment.Status
 	now := time.Now()
 	updated, processedOrder, orderPaid, err := s.applyPaymentUpdate(payment, order, status, input, now)
@@ -130,6 +118,7 @@ func (s *PaymentService) HandleCallback(input PaymentCallbackInput) (*paymentdom
 		"order_no", processedOrder.OrderNo,
 		"previous_status", previousStatus,
 		"new_status", updated.Status,
+		"exception_code", updated.ExceptionCode,
 		"order_paid", orderPaid,
 	)
 	return updated, nil
@@ -203,10 +192,6 @@ func adoptVerifiedLegacyDujiaoPayCurrency(payment *paymentdomain.Payment, status
 	return true
 }
 
-func (s *PaymentService) updateCallbackMeta(payment *paymentdomain.Payment, status string, input PaymentCallbackInput) (*paymentdomain.Payment, error) {
-	return updateCallbackMetaWithRepo(s.paymentRepo, payment, status, input)
-}
-
 func updateCallbackMetaWithRepo(repo paymentcontract.Store, payment *paymentdomain.Payment, status string, input PaymentCallbackInput) (*paymentdomain.Payment, error) {
 	updated := adoptVerifiedLegacyDujiaoPayCurrency(payment, status, input)
 	if input.ProviderRef != "" && payment.ProviderRef == "" {
@@ -273,6 +258,12 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 			return err
 		}
 
+		orderOpen := lockedOrder.Status == constants.OrderStatusPendingPayment && lockedOrder.PaidAt == nil
+		requiredOnline := normalizeOrderAmount(lockedOrder.TotalAmount.Decimal.Sub(lockedOrder.WalletPaidAmount.Decimal))
+		coveredOnline, validSnapshot := paymentCoveredOrderAmount(lockedPayment, lockedOrder.Currency)
+		underpaid := status == constants.PaymentStatusSuccess && orderOpen && validSnapshot && coveredOnline.LessThan(requiredOnline)
+		canFulfill := status == constants.PaymentStatusSuccess && orderOpen && validSnapshot && !underpaid
+
 		switch status {
 		case constants.PaymentStatusSuccess:
 			paidAt := now
@@ -280,6 +271,16 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 				paidAt = *input.PaidAt
 			}
 			lockedPayment.PaidAt = &paidAt
+			switch {
+			case !orderOpen && lockedOrder.PaidAt != nil:
+				lockedPayment.ExceptionCode = constants.PaymentExceptionDuplicateSucceeded
+			case !orderOpen:
+				lockedPayment.ExceptionCode = constants.PaymentExceptionClosedOrderSucceeded
+			case !validSnapshot:
+				lockedPayment.ExceptionCode = constants.PaymentExceptionInvalidAmountSnapshot
+			case underpaid:
+				lockedPayment.ExceptionCode = constants.PaymentExceptionUnderpaidSucceeded
+			}
 		case constants.PaymentStatusExpired:
 			lockedPayment.ExpiredAt = &now
 		}
@@ -297,7 +298,7 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 			return ErrPaymentUpdateFailed
 		}
 
-		if status == constants.PaymentStatusSuccess && lockedOrder.Status != constants.OrderStatusPaid {
+		if canFulfill {
 			if err := s.markOrderPaid(tx, lockedOrder, now); err != nil {
 				return err
 			}
@@ -307,10 +308,39 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 				}
 			}
 			orderPaid = true
+			if _, err := paymentRepo.ExpirePendingByOrderIDs([]uint{lockedOrder.ID}, now); err != nil {
+				return ErrPaymentUpdateFailed
+			}
 		}
-		if (status == constants.PaymentStatusFailed || status == constants.PaymentStatusExpired) && lockedOrder.Status == constants.OrderStatusPendingPayment && s.walletSvc != nil {
-			if _, err := orderapp.ReleaseWalletBalance(s.walletSvc, tx, lockedOrder, constants.WalletTxnTypeOrderRefund, "在线支付失败，退回余额"); err != nil {
+		if underpaid && s.walletSvc != nil && lockedOrder.UserID > 0 && coveredOnline.IsPositive() {
+			orderID := lockedOrder.ID
+			if _, _, err := s.walletSvc.CreditInTransaction(tx.Wallets(), walletcontract.CreditInput{
+				UserID: lockedOrder.UserID, Amount: money.FromDecimal(coveredOnline), Currency: lockedOrder.Currency,
+				Type: constants.WalletTxnTypeOrderUnderpaidCredit, Reference: fmt.Sprintf("payment:%d:underpaid_credit", lockedPayment.ID),
+				Remark: "支付金额不足以完成订单，款项已转入余额", OrderID: &orderID,
+			}); err != nil {
 				return err
+			}
+		}
+		if (status == constants.PaymentStatusFailed || status == constants.PaymentStatusExpired) && orderOpen && s.walletSvc != nil &&
+			lockedOrder.WalletPaidAmount.Decimal.IsPositive() && validSnapshot && coveredOnline.Equal(requiredOnline) {
+			payments, err := paymentRepo.ListByOrderID(lockedOrder.ID)
+			if err != nil {
+				return ErrPaymentUpdateFailed
+			}
+			hasReplacement := false
+			for _, candidate := range payments {
+				if candidate.ID != lockedPayment.ID &&
+					(candidate.Status == constants.PaymentStatusInitiated || candidate.Status == constants.PaymentStatusPending) &&
+					(candidate.ExpiredAt == nil || candidate.ExpiredAt.After(now)) {
+					hasReplacement = true
+					break
+				}
+			}
+			if !hasReplacement {
+				if _, err := orderapp.ReleaseWalletBalance(s.walletSvc, tx, lockedOrder, constants.WalletTxnTypeOrderRefund, "在线支付失败，退回余额"); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -323,7 +353,7 @@ func (s *PaymentService) applyPaymentUpdate(payment *paymentdomain.Payment, orde
 }
 
 // mergeProviderPayload 合并第三方回调原文，同时保留创建支付阶段写入的展示快照等元数据。
-// 回调字段优先覆盖同名旧字段，未出现在回调中的 display_channel_type 等字段不会丢失。
+// 回调不得插入或覆盖创建快照；已有快照缺失也不能由回调补齐。
 func mergeProviderPayload(existing jsonmap.JSON, incoming jsonmap.JSON) jsonmap.JSON {
 	if incoming == nil {
 		return existing
@@ -333,6 +363,11 @@ func mergeProviderPayload(existing jsonmap.JSON, incoming jsonmap.JSON) jsonmap.
 		merged[key] = value
 	}
 	for key, value := range incoming {
+		switch key {
+		case "exchange_rate", "original_amount", "original_currency", "display_channel_type",
+			"mode", "endpoint", "params", "token", "submit_method", paymentcontract.GatewayPayloadFiatCurrencySent:
+			continue
+		}
 		merged[key] = value
 	}
 	return merged

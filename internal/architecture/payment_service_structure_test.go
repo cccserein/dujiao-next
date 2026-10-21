@@ -30,6 +30,7 @@ func TestPaymentServiceImplementationIsSplitByResponsibility(t *testing.T) {
 			"tenantReturnPath", "resolveTokenPayOrderUserKey",
 		},
 		"payment_service_rules.go": {
+			"paymentCoveredOrderAmount", "paymentSnapshotAmount",
 			"normalizeOrderAmount", "pickFirstNonEmpty",
 			"shouldMarkFulfilling", "shouldUseCNYPaymentCurrency", "validatePaymentAmountForChannel",
 			"validatePaymentCurrencyForChannel", "resolveExpireMinutes", "normalizePaymentStatus",

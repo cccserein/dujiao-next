@@ -14,22 +14,25 @@ import (
 	"github.com/dujiao-next/internal/modules/payment/infrastructure/gateway/epay"
 	"github.com/dujiao-next/internal/shared/jsonmap"
 	"github.com/dujiao-next/internal/shared/money"
-
-	"github.com/shopspring/decimal"
 )
 
-// epayAdapter 是 epay 网关的 paymentcontract.GatewayProvider + paymentcontract.GatewayCallbackVerifier 实现。
-// epay 没有主动查询 API，callback 是同步 form POST（不是 JSON webhook），
-// 所以**不**实现 paymentcontract.GatewayCapturer 和 paymentcontract.GatewayWebhooker。
+// epayAdapter 是 epay 网关的 paymentcontract.GatewayProvider +
+// paymentcontract.GatewayCallbackVerifier + paymentcontract.CallbackCorroborator 实现。
+// epay 没有异步 JSON webhook，callback 是同步 form POST，所以**不**实现
+// paymentcontract.GatewayWebhooker；
+// 它支持 v1 的 api.php?act=order 主动查询，用于在放行回调前复核真实收款，
+// 因此实现 CallbackCorroborator（而非 GatewayCapturer：capture 语义只服务于
+// official 渠道的"主动捕获"流程）。
 type epayAdapter struct{}
 
 // NewEpayAdapter 实例化 epay adapter。
 func NewEpayAdapter() paymentcontract.GatewayProvider { return &epayAdapter{} }
 
-// 编译期断言 epayAdapter 实现了 paymentcontract.GatewayProvider 和 paymentcontract.GatewayCallbackVerifier。
+// 编译期断言 epayAdapter 实现的能力集合。
 var (
 	_ paymentcontract.GatewayProvider         = (*epayAdapter)(nil)
 	_ paymentcontract.GatewayCallbackVerifier = (*epayAdapter)(nil)
+	_ paymentcontract.CallbackCorroborator    = (*epayAdapter)(nil)
 )
 
 // Type 返回 provider 标识。
@@ -188,23 +191,106 @@ func (a *epayAdapter) VerifyCallback(raw jsonmap.JSON, form map[string][]string,
 		status = constants.PaymentStatusSuccess
 	}
 
-	// amount 解析失败时返回零值：wrapper 仅做适配，金额异常由业务层判定。
-	amount := money.Amount{}
-	if s := strings.TrimSpace(amountStr); s != "" {
-		if d, parseErr := decimal.NewFromString(s); parseErr == nil {
-			amount = money.FromDecimal(d)
-		}
+	if orderNo == "" || providerRef == "" {
+		return nil, mapEpayError(epay.ErrResponseInvalid)
+	}
+	parsedAmount, err := epay.ParseAmount(amountStr)
+	if err != nil {
+		return nil, mapEpayError(err)
+	}
+	currency, err := epay.ConfiguredCurrency(cfg)
+	if err != nil {
+		return nil, mapEpayError(err)
+	}
+	if values, present := form["currency"]; present && strings.ToUpper(strings.TrimSpace(values[0])) != currency {
+		return nil, mapEpayError(epay.ErrResponseInvalid)
 	}
 
 	return &paymentcontract.GatewayCallbackResult{
 		OrderNo:     orderNo,
 		ProviderRef: providerRef,
 		Status:      status,
-		Amount:      amount,
-		Currency:    "CNY",
+		Amount:      money.FromDecimal(parsedAmount),
+		Currency:    currency,
 		PaidAt:      nil, // epay callback 不带付款时间字段
-		Payload:     gatewaycommon.FormToJSON(form),
+		Payload:     callbackPayload(form),
 	}, nil
+}
+
+// CorroboratePayment 实现 paymentcontract.CallbackCorroborator：
+// 在把"支付成功"回调落库、发货之前，按精确网关流水号 trade_no 查询，
+// 并核对响应中的商户单号和网关流水号均与输入绑定一致。
+// 只有网关明确返回 status==1 才认定为已收款；查询失败按未核实处理（返回错误）。
+func (a *epayAdapter) CorroboratePayment(ctx context.Context, raw jsonmap.JSON, input paymentcontract.CorroborateInput) (*paymentcontract.GatewayQueryResult, error) {
+	cfg, err := epay.ParseConfig(raw)
+	if err != nil {
+		return nil, mapEpayError(err)
+	}
+
+	// Unsupported versions remain an explicit error for the caller to fail closed.
+	if cfg.EpayVersion == epay.VersionV2 {
+		return nil, paymentcontract.ErrGatewayCorroborationUnsupported
+	}
+	orderNo, providerRef := strings.TrimSpace(input.OrderNo), strings.TrimSpace(input.ProviderRef)
+	if orderNo == "" || providerRef == "" {
+		return nil, paymentcontract.ErrGatewayConfigInvalid
+	}
+	expectedAmount, err := epay.ParseAmount(input.Amount.String())
+	if err != nil {
+		return nil, mapEpayError(err)
+	}
+	currency, err := epay.ConfiguredCurrency(cfg)
+	if err != nil {
+		return nil, mapEpayError(err)
+	}
+	if strings.ToUpper(strings.TrimSpace(input.Currency)) != currency {
+		return nil, paymentcontract.ErrGatewayResponseInvalid
+	}
+
+	result, err := epay.QueryOrder(ctx, cfg, orderNo, providerRef)
+	if err != nil {
+		if errors.Is(err, epay.ErrQueryUnsupported) {
+			return nil, fmt.Errorf("%w: %v", paymentcontract.ErrGatewayCorroborationUnsupported, err)
+		}
+		return nil, mapEpayError(err)
+	}
+
+	status := constants.PaymentStatusPending
+	if result.Status == 1 {
+		status = constants.PaymentStatusSuccess
+	}
+
+	parsedAmount, err := epay.ParseAmount(result.Money)
+	if err != nil || !parsedAmount.Equal(expectedAmount) {
+		return nil, paymentcontract.ErrGatewayResponseInvalid
+	}
+
+	return &paymentcontract.GatewayQueryResult{
+		ProviderRef: result.TradeNo,
+		Status:      status,
+		Amount:      money.FromDecimal(parsedAmount),
+		Currency:    result.Currency,
+		Payload: jsonmap.JSON{
+			"epay_query_code":         result.Code,
+			"epay_query_status":       result.Status,
+			"epay_query_money":        result.Money,
+			"epay_query_trade_no":     result.TradeNo,
+			"epay_query_out_trade_no": result.OutTradeNo,
+		},
+	}, nil
+}
+
+// Callback data is untrusted even after signature verification: a leaked
+// merchant key must not overwrite creation-time conversion or redirect facts.
+// Apply the same allowlist to pending and successful callbacks alike.
+func callbackPayload(form map[string][]string) jsonmap.JSON {
+	payload := jsonmap.JSON{}
+	for _, key := range []string{"pid", "type", "out_trade_no", "trade_no", "trade_status", "name", "money", "currency", "param", "sign", "sign_type", "timestamp", "notify_time"} {
+		if values, ok := form[key]; ok && len(values) == 1 {
+			payload[key] = values[0]
+		}
+	}
+	return payload
 }
 
 // mapEpayError 把 epay 包的 sentinel error 映射为 provider 统一错误。

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -22,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/modules/payment/infrastructure/gateway/common"
@@ -38,6 +41,8 @@ const (
 	epayAPIPathV1    = "/mapi.php"
 	epaySubmitPathV2 = "/api/pay/submit"
 	epaySubmitPathV1 = "/submit.php"
+	// epayQueryPathV1 是彩虹易支付系网关的订单查询入口（api.php?act=order）。
+	epayQueryPathV1 = "/api.php"
 
 	epayMethodWeb = "web"
 	epayDevicePC  = "pc"
@@ -52,6 +57,7 @@ var (
 	ErrChannelTypeNotOK  = errors.New("epay channel type invalid")
 	ErrSignatureGenerate = errors.New("epay signature generate failed")
 	ErrSignatureInvalid  = errors.New("epay signature invalid")
+	ErrQueryUnsupported  = errors.New("epay query unsupported")
 )
 
 // Config 易支付配置
@@ -69,6 +75,7 @@ type Config struct {
 	ReturnURL   string `json:"return_url"`          // 同步跳转地址
 	Method      string `json:"method"`              // 支付方式（v2 method）
 	Device      string `json:"device"`              // 设备类型（v1 device）
+	QueryPath   string `json:"query_path"`          // 订单查询接口路径（v1，默认 /api.php）
 }
 
 // CreateInput 易支付下单输入
@@ -210,6 +217,9 @@ func (c *Config) Normalize() {
 	if c.Device == "" {
 		c.Device = epayDevicePC
 	}
+	if c.QueryPath == "" {
+		c.QueryPath = epayQueryPathV1
+	}
 	c.ExchangeRateConfig.NormalizeExchangeRate()
 }
 
@@ -296,6 +306,11 @@ func VerifyCallback(cfg *Config, form map[string][]string) error {
 	if cfg == nil {
 		return ErrConfigInvalid
 	}
+	for _, values := range form {
+		if len(values) != 1 {
+			return ErrSignatureInvalid
+		}
+	}
 	sign := strings.TrimSpace(firstValue(form, "sign"))
 	if sign == "" {
 		return ErrSignatureInvalid
@@ -312,8 +327,11 @@ func VerifyCallback(cfg *Config, form map[string][]string) error {
 	case VersionV2:
 		return verifyRSA(content, sign, cfg.PublicKey)
 	default:
+		if strings.TrimSpace(cfg.MerchantKey) == "" {
+			return ErrConfigInvalid
+		}
 		expected := signMD5(content + cfg.MerchantKey)
-		if !strings.EqualFold(expected, sign) {
+		if subtle.ConstantTimeCompare([]byte(expected), []byte(strings.ToLower(sign))) != 1 {
 			return ErrSignatureInvalid
 		}
 	}
@@ -333,6 +351,204 @@ func VerifyCallbackOwnership(cfg *Config, form map[string][]string) error {
 		return ErrSignatureInvalid
 	}
 	return nil
+}
+
+// QueryResult 是易支付订单主动查询结果。
+type QueryResult struct {
+	Code       int    // 1 = 查询成功；其它值表示网关未返回有效订单
+	Msg        string // 网关返回的提示信息
+	TradeNo    string // 网关流水号
+	OutTradeNo string // 商户单号
+	Money      string // 网关记录的金额（含手续费后的实收金额）
+	Status     int    // 1 = 已支付；0 = 未支付
+	PayType    string // 支付方式
+	Name       string // 商品名称
+	AddTime    string // 下单时间
+	EndTime    string // 支付完成时间，未支付时为空
+	Currency   string // 网关配置的币种；响应若显式声明必须一致
+}
+
+// QueryOrder queries the exact gateway attempt, never the latest attempt under
+// a reused merchant order number. Both identifiers must match the reply.
+func QueryOrder(ctx context.Context, cfg *Config, outTradeNo, providerRef string) (*QueryResult, error) {
+	if cfg == nil {
+		return nil, ErrConfigInvalid
+	}
+	if cfg.EpayVersion == VersionV2 {
+		return nil, ErrQueryUnsupported
+	}
+	if cfg.EpayVersion != "" && cfg.EpayVersion != VersionV1 {
+		return nil, ErrConfigInvalid
+	}
+	if strings.TrimSpace(cfg.MerchantID) == "" || strings.TrimSpace(cfg.MerchantKey) == "" {
+		return nil, ErrConfigInvalid
+	}
+	orderNo, tradeNo := strings.TrimSpace(outTradeNo), strings.TrimSpace(providerRef)
+	if orderNo == "" || tradeNo == "" {
+		return nil, ErrConfigInvalid
+	}
+	currency, err := ConfiguredCurrency(cfg)
+	if err != nil {
+		return nil, err
+	}
+	base, err := url.Parse(strings.TrimSpace(cfg.GatewayURL))
+	if err != nil || base.Scheme != "https" || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return nil, ErrConfigInvalid
+	}
+	queryPath := strings.TrimSpace(cfg.QueryPath)
+	if queryPath == "" {
+		queryPath = epayQueryPathV1
+	}
+	parsedPath, err := url.Parse(queryPath)
+	if err != nil || parsedPath.IsAbs() || parsedPath.Host != "" || parsedPath.RawQuery != "" || parsedPath.Fragment != "" {
+		return nil, ErrConfigInvalid
+	}
+	endpoint := buildEndpoint(base.String(), queryPath) + "?act=order"
+	values := url.Values{"pid": {strings.TrimSpace(cfg.MerchantID)}, "key": {cfg.MerchantKey}, "trade_no": {tradeNo}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(values.Encode()))
+	if err != nil {
+		return nil, ErrConfigInvalid
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Encoding", "identity")
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, ErrRequestFailed
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, ErrRequestFailed
+	}
+	const maxQueryResponseBytes = 64 << 10
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQueryResponseBytes+1))
+	if err != nil {
+		return nil, ErrRequestFailed
+	}
+	if len(body) > maxQueryResponseBytes {
+		return nil, ErrResponseInvalid
+	}
+	body, err = normalizeResponseBody(body)
+	if err != nil {
+		return nil, ErrResponseInvalid
+	}
+	payload, err := parseQueryObject(body)
+	if err != nil {
+		return nil, err
+	}
+	if queryScalar(payload["code"]) != "1" || queryScalar(payload["pid"]) != strings.TrimSpace(cfg.MerchantID) ||
+		queryScalar(payload["out_trade_no"]) != orderNo || queryScalar(payload["trade_no"]) != tradeNo {
+		return nil, ErrResponseInvalid
+	}
+	status, err := parseQueryStatus(payload["status"])
+	if err != nil {
+		return nil, err
+	}
+	amount := queryScalar(payload["money"])
+	if _, err := ParseAmount(amount); err != nil {
+		return nil, ErrResponseInvalid
+	}
+	if rawCurrency, present := payload["currency"]; present && strings.ToUpper(queryScalar(rawCurrency)) != currency {
+		return nil, ErrResponseInvalid
+	}
+	return &QueryResult{Code: 1, TradeNo: tradeNo, OutTradeNo: orderNo, Money: amount, Status: status, Currency: currency}, nil
+}
+
+// ParseAmount rejects empty/non-positive values, exponents, excessive input and
+// fractional cents instead of silently rounding gateway-controlled data.
+func ParseAmount(raw string) (decimal.Decimal, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || len(value) > 32 {
+		return decimal.Decimal{}, ErrResponseInvalid
+	}
+	for _, char := range value {
+		if char != '.' && (char < '0' || char > '9') {
+			return decimal.Decimal{}, ErrResponseInvalid
+		}
+	}
+	amount, err := decimal.NewFromString(value)
+	if err != nil || !amount.IsPositive() || !amount.Equal(amount.Round(2)) {
+		return decimal.Decimal{}, ErrResponseInvalid
+	}
+	return amount, nil
+}
+
+// ConfiguredCurrency never guesses the denomination from callback data.
+func ConfiguredCurrency(cfg *Config) (string, error) {
+	if cfg == nil {
+		return "", ErrConfigInvalid
+	}
+	currency := strings.ToUpper(strings.TrimSpace(cfg.TargetCurrency))
+	if currency == "" {
+		currency = "CNY"
+	}
+	if len(currency) != 3 {
+		return "", ErrConfigInvalid
+	}
+	for _, char := range currency {
+		if char < 'A' || char > 'Z' {
+			return "", ErrConfigInvalid
+		}
+	}
+	return currency, nil
+}
+
+func parseQueryObject(body []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, ErrResponseInvalid
+	}
+	payload := map[string]json.RawMessage{}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, ErrResponseInvalid
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, ErrResponseInvalid
+		}
+		if _, duplicate := payload[key]; duplicate {
+			return nil, ErrResponseInvalid
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return nil, ErrResponseInvalid
+		}
+		payload[key] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, ErrResponseInvalid
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, ErrResponseInvalid
+	}
+	return payload, nil
+}
+
+func queryScalar(raw json.RawMessage) string {
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		return strings.TrimSpace(value)
+	}
+	var number json.Number
+	if json.Unmarshal(raw, &number) == nil {
+		return number.String()
+	}
+	return ""
+}
+
+func parseQueryStatus(raw json.RawMessage) (int, error) {
+	switch queryScalar(raw) {
+	case "0":
+		return 0, nil
+	case "1":
+		return 1, nil
+	default:
+		return 0, ErrResponseInvalid
+	}
 }
 
 func createV2(ctx context.Context, cfg *Config, input CreateInput, payType string) (*CreateResult, error) {

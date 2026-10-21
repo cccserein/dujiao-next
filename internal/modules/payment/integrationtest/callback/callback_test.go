@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	epayadapter "github.com/dujiao-next/internal/modules/payment/infrastructure/gateway/adapters/epay"
 	okpayadapter "github.com/dujiao-next/internal/modules/payment/infrastructure/gateway/adapters/okpay"
 
 	paymentapp "github.com/dujiao-next/internal/modules/payment/application"
@@ -41,6 +45,7 @@ import (
 )
 
 type okpayCallbackFixture struct {
+	db          *gorm.DB
 	orderRepo   ordercontract.Store
 	paymentRepo paymentcontract.Store
 	handler     *paymentcallback.Handler
@@ -152,6 +157,7 @@ func newOkpayCallbackFixture(t *testing.T) *okpayCallbackFixture {
 		Status:          constants.PaymentStatusPending,
 		ProviderRef:     "OKPAY-ORDER-1",
 		GatewayOrderNo:  "DJP9001",
+		ProviderPayload: jsonmap.JSON{"exchange_rate": "7", "original_amount": "88.00", "original_currency": "CNY"},
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -179,11 +185,135 @@ func newOkpayCallbackFixture(t *testing.T) *okpayCallbackFixture {
 	})
 
 	return &okpayCallbackFixture{
+		db:          db,
 		orderRepo:   orderRepo,
 		paymentRepo: paymentRepo,
 		handler:     paymentcallback.NewHandler(callbackServiceTestAdapter{payments: paymentService}, paymentRepo, channelRepo, nil),
 		order:       order,
 		payment:     payment,
+	}
+}
+
+func TestPaymentCallbackLegacyEpayRequiresExactBusinessAndGatewayOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		placeholderRef   bool
+		wrongBusinessNo  bool
+		wrongGatewayNo   bool
+		modernPayment    bool
+		wantSuccess      bool
+		wantGatewayCalls int32
+	}{
+		{name: "legacy QR with known gateway trade", wantSuccess: true, wantGatewayCalls: 1},
+		{name: "legacy redirect with business order placeholder", placeholderRef: true, wantSuccess: true, wantGatewayCalls: 1},
+		{name: "known trade cannot pay another business order", wrongBusinessNo: true},
+		{name: "gateway reply belongs to another order", placeholderRef: true, wrongGatewayNo: true, wantGatewayCalls: 1},
+		{name: "modern payment cannot use legacy lookup", modernPayment: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newOkpayCallbackFixture(t)
+			const merchantID = "test-legacy-merchant"
+			const merchantKey = "test-only-legacy-epay-key"
+			const providerRef = "LEGACY-GATEWAY-TRADE"
+			var gatewayCalls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gatewayCalls.Add(1)
+				if r.Method != http.MethodPost || r.URL.Query().Get("act") != "order" || r.URL.Query().Get("key") != "" {
+					t.Errorf("independent query must use POST with credentials outside URL")
+				}
+				if err := r.ParseForm(); err != nil || r.PostForm.Get("pid") != merchantID || r.PostForm.Get("key") != merchantKey || r.PostForm.Get("trade_no") != providerRef {
+					t.Errorf("independent query did not target the exact gateway trade")
+				}
+				orderNo := fixture.order.OrderNo
+				if tc.wrongGatewayNo {
+					orderNo = "ANOTHER-BUSINESS-ORDER"
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"code":1,"pid":%q,"trade_no":%q,"out_trade_no":%q,"money":"88.00","status":1}`, merchantID, providerRef, orderNo)
+			}))
+			t.Cleanup(server.Close)
+			previousTransport := http.DefaultTransport
+			http.DefaultTransport = server.Client().Transport
+			t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+			channel := &paymentdomain.PaymentChannel{
+				ID: fixture.payment.ChannelID, Name: "epay mock", ProviderType: constants.PaymentProviderEpay,
+				ChannelType: constants.PaymentChannelTypeAlipay, InteractionMode: constants.PaymentInteractionRedirect, IsActive: true,
+				ConfigJSON: jsonmap.JSON{"gateway_url": server.URL, "epay_version": "v1", "merchant_id": merchantID, "merchant_key": merchantKey,
+					"notify_url": "https://shop.example.test/api/v1/payments/callback", "return_url": "https://shop.example.test/pay"},
+			}
+			if err := fixture.db.Save(channel).Error; err != nil {
+				t.Fatal(err)
+			}
+			fixture.payment.ProviderType = constants.PaymentProviderEpay
+			fixture.payment.ChannelType = constants.PaymentChannelTypeAlipay
+			fixture.payment.Amount = money.FromDecimal(decimal.NewFromInt(88))
+			fixture.payment.Currency = "CNY"
+			fixture.payment.GatewayOrderNo = ""
+			fixture.payment.ProviderRef = providerRef
+			if tc.placeholderRef {
+				fixture.payment.ProviderRef = fixture.order.OrderNo
+			}
+			if tc.modernPayment {
+				fixture.payment.GatewayOrderNo = "DJP-MODERN-PAYMENT"
+			}
+			if err := fixture.paymentRepo.Update(fixture.payment); err != nil {
+				t.Fatal(err)
+			}
+			registry := paymentprovider.NewRegistry()
+			registry.Register(constants.PaymentProviderEpay, "", epayadapter.NewEpayAdapter())
+			channelRepo := paymentgormstore.NewChannelStore(fixture.db)
+			service := paymentapp.NewPaymentService(paymentapp.PaymentServiceOptions{
+				OrderStore: fixture.orderRepo, ProductRepo: productgormstore.NewProductStore(fixture.db),
+				PaymentStore: fixture.paymentRepo, ChannelStore: channelRepo, PaymentProviderRegistry: registry,
+			})
+			handler := paymentcallback.NewHandler(callbackServiceTestAdapter{payments: service}, fixture.paymentRepo, channelRepo, nil)
+			orderNo := fixture.order.OrderNo
+			if tc.wrongBusinessNo {
+				orderNo = "WRONG-BUSINESS-ORDER"
+			}
+			form := url.Values{"pid": {merchantID}, "out_trade_no": {orderNo}, "trade_no": {providerRef}, "money": {"88.00"}, "trade_status": {"TRADE_SUCCESS"}, "type": {"alipay"}}
+			keys := make([]string, 0, len(form))
+			for key := range form {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(keys))
+			for _, key := range keys {
+				parts = append(parts, key+"="+form.Get(key))
+			}
+			digest := md5.Sum([]byte(strings.Join(parts, "&") + merchantKey))
+			form.Set("sign", hex.EncodeToString(digest[:]))
+			form.Set("sign_type", "MD5")
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = request
+			handler.PaymentCallback(ctx)
+			wantResponse := constants.EpayCallbackFail
+			wantPaymentStatus := constants.PaymentStatusPending
+			wantOrderStatus := constants.OrderStatusPendingPayment
+			if tc.wantSuccess {
+				wantResponse = constants.EpayCallbackSuccess
+				wantPaymentStatus = constants.PaymentStatusSuccess
+				wantOrderStatus = constants.OrderStatusPaid
+			}
+			if recorder.Code != http.StatusOK || strings.TrimSpace(recorder.Body.String()) != wantResponse {
+				t.Fatalf("callback HTTP %d body=%q, want %q", recorder.Code, recorder.Body.String(), wantResponse)
+			}
+			if got := gatewayCalls.Load(); got != tc.wantGatewayCalls {
+				t.Fatalf("gateway calls=%d, want %d", got, tc.wantGatewayCalls)
+			}
+			payment, err := fixture.paymentRepo.GetByID(fixture.payment.ID)
+			if err != nil || payment == nil || payment.Status != wantPaymentStatus {
+				t.Fatalf("payment status must be %s: payment=%+v err=%v", wantPaymentStatus, payment, err)
+			}
+			order, err := fixture.orderRepo.GetByID(fixture.order.ID)
+			if err != nil || order == nil || order.Status != wantOrderStatus {
+				t.Fatalf("order status must be %s: order=%+v err=%v", wantOrderStatus, order, err)
+			}
+		})
 	}
 }
 

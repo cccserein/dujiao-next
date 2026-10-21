@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -973,4 +975,372 @@ func assertWalletRechargeSuccessState(t *testing.T, db *gorm.DB, paymentID uint,
 
 func ptrTime(v time.Time) *time.Time {
 	return &v
+}
+
+func coverageMoney(value string) money.Amount {
+	return money.FromDecimal(decimal.RequireFromString(value))
+}
+
+func createCoverageFixture(t *testing.T, db *gorm.DB, total, payable, fee, orderCurrency, paymentCurrency string, payload jsonmap.JSON) (*orderdomain.Order, *paymentdomain.Payment) {
+	t.Helper()
+	now := time.Now()
+	user := userdomain.User{Email: fmt.Sprintf("coverage-%d@example.invalid", now.UnixNano()), Status: constants.UserStatusActive, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	order := &orderdomain.Order{OrderNo: fmt.Sprintf("COVERAGE-%d", now.UnixNano()), UserID: user.ID, Status: constants.OrderStatusPendingPayment, Currency: orderCurrency, OriginalAmount: coverageMoney(total), TotalAmount: coverageMoney(total), OnlinePaidAmount: coverageMoney(total), CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatal(err)
+	}
+	payment := &paymentdomain.Payment{OrderID: order.ID, ChannelID: 1, ProviderType: constants.PaymentProviderEpay, ChannelType: constants.PaymentChannelTypeAlipay, Amount: coverageMoney(payable), FeeAmount: coverageMoney(fee), Currency: paymentCurrency, Status: constants.PaymentStatusPending, GatewayOrderNo: order.OrderNo, ProviderPayload: payload, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(payment).Error; err != nil {
+		t.Fatal(err)
+	}
+	return order, payment
+}
+
+func coverageCallback(payment *paymentdomain.Payment, status string) PaymentCallbackInput {
+	return PaymentCallbackInput{PaymentID: payment.ID, ChannelID: payment.ChannelID, OrderNo: payment.GatewayOrderNo, ProviderRef: "SYNTHETIC-RECEIPT", Status: status, Amount: payment.Amount, Currency: payment.Currency}
+}
+
+func TestCallbackCoverageUsesNetCreationAmounts(t *testing.T) {
+	for _, tc := range []struct{ name, total, payable, fee, orderCurrency, paymentCurrency, original, rate, exception, credit, feePolicy string }{
+		{"same currency full", "100", "100", "0", "CNY", "CNY", "", "", "", "0", ""},
+		{"legacy customer surcharge", "100", "103", "3", "CNY", "CNY", "", "", "", "0", ""},
+		{"customer surcharge", "100", "103", "3", "CNY", "CNY", "", "", "", "0", constants.PaymentFeePolicyCustomerSurcharge},
+		{"merchant absorbed", "100", "100", "3", "CNY", "CNY", "", "", "", "0", constants.PaymentFeePolicyMerchantAbsorbed},
+		{"explicit no surcharge", "100", "100", "3", "CNY", "CNY", "", "", "", "0", constants.PaymentFeePolicyNone},
+		{"unknown fee policy", "100", "100", "3", "CNY", "CNY", "", "", constants.PaymentExceptionInvalidAmountSnapshot, "0", "unrecognized"},
+		{"fee is not merchandise", "100", "3", "1", "CNY", "CNY", "", "", constants.PaymentExceptionUnderpaidSucceeded, "2", ""},
+		{"rounded conversion full", "35.50", "0.99", "0", "USD", "EUR", "35.50", "0.028", "", "0", ""},
+		{"converted customer surcharge", "35", "0.99", "0.50", "USD", "EUR", "35.50", "0.028", "", "0", ""},
+		{"converted merchant absorbed", "35.50", "0.99", "0.50", "USD", "EUR", "35.50", "0.028", "", "0", constants.PaymentFeePolicyMerchantAbsorbed},
+		{"conversion missing snapshot", "100", "1", "0", "USD", "EUR", "", "", constants.PaymentExceptionInvalidAmountSnapshot, "0", ""},
+		{"conversion contradictory snapshot", "100", "1", "0", "USD", "EUR", "100", "0.02", constants.PaymentExceptionInvalidAmountSnapshot, "0", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, db := setupPaymentServiceWalletTest(t)
+			payload := jsonmap.JSON{}
+			if tc.original != "" {
+				payload = jsonmap.JSON{"original_amount": tc.original, "original_currency": tc.orderCurrency, "exchange_rate": tc.rate}
+			}
+			order, payment := createCoverageFixture(t, db, tc.total, tc.payable, tc.fee, tc.orderCurrency, tc.paymentCurrency, payload)
+			payment.FeePolicy = tc.feePolicy
+			if err := db.Save(payment).Error; err != nil {
+				t.Fatal(err)
+			}
+			other := *payment
+			other.ID = 0
+			other.ProviderPayload = nil
+			other.GatewayOrderNo += "-NEW"
+			if err := db.Create(&other).Error; err != nil {
+				t.Fatal(err)
+			}
+			for repeat := 0; repeat < 2; repeat++ {
+				updated, err := svc.HandleCallback(coverageCallback(payment, constants.PaymentStatusSuccess))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if updated.ExceptionCode != tc.exception {
+					t.Fatalf("exception=%q, want %q", updated.ExceptionCode, tc.exception)
+				}
+			}
+			if err := db.First(order, order.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			wantPaid := tc.exception == ""
+			if (order.PaidAt != nil) != wantPaid {
+				t.Fatalf("order paid=%v, want %v", order.PaidAt != nil, wantPaid)
+			}
+			var account walletdomain.Account
+			if err := db.Where("user_id = ?", order.UserID).Find(&account).Error; err != nil {
+				t.Fatal(err)
+			}
+			if !account.Balance.Decimal.Equal(decimal.RequireFromString(tc.credit)) {
+				t.Fatalf("credited=%s, want %s", account.Balance.String(), tc.credit)
+			}
+			if err := db.First(&other, other.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			wantStatus := constants.PaymentStatusPending
+			if wantPaid {
+				wantStatus = constants.PaymentStatusExpired
+			}
+			if other.Status != wantStatus {
+				t.Fatalf("other payment status=%s want %s", other.Status, wantStatus)
+			}
+		})
+	}
+}
+
+func TestOldLinkReceiptAfterWalletReleaseDoesNotPayFullOrder(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	order, _ := createCoverageFixture(t, db, "100", "100", "0", "CNY", "CNY", nil)
+	account := walletdomain.Account{UserID: order.UserID, Balance: coverageMoney("99")}
+	if err := db.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	var lookups atomic.Int32
+	oldNo, newNo := "", ""
+	gateway := newVerifyTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lookups.Add(1)
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		no, receipt := oldNo, "1.00"
+		if r.Form.Get("trade_no") == "NEW-REAL-RECEIPT" {
+			no, receipt = newNo, "100.00"
+		}
+		_, _ = fmt.Fprintf(w, `{"code":1,"status":1,"pid":"56796329","trade_no":%q,"out_trade_no":%q,"money":%q}`, r.Form.Get("trade_no"), no, receipt)
+	}))
+	channel := newEpayVerifyChannel(gateway.URL)
+	channel.ID = 0
+	channel.IsActive = true
+	channel.InteractionMode = constants.PaymentInteractionRedirect
+	if err := db.Create(channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	first, err := svc.CreatePayment(CreatePaymentInput{OrderID: order.ID, ChannelID: channel.ID, UseBalance: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldNo = first.Payment.GatewayOrderNo
+	second, err := svc.CreatePayment(CreatePaymentInput{OrderID: order.ID, ChannelID: channel.ID, UseBalance: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newNo = second.Payment.GatewayOrderNo
+	if first.Payment.ID == second.Payment.ID || !second.Payment.Amount.Decimal.Equal(decimal.NewFromInt(100)) {
+		t.Fatal("wallet release reused the small link")
+	}
+	callback := func(payment *paymentdomain.Payment, ref string) *paymentdomain.Payment {
+		t.Helper()
+		form := signEpayCallbackForm(verifyTestMerchantKey, map[string]string{"pid": "56796329", "trade_no": ref, "out_trade_no": payment.GatewayOrderNo, "money": payment.Amount.String(), "trade_status": constants.EpayTradeStatusSuccess})
+		updated, err := svc.HandleSyncCallback(channel, form, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return updated
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if got := callback(first.Payment, "OLD-REAL-RECEIPT"); got.ExceptionCode != constants.PaymentExceptionUnderpaidSucceeded {
+			t.Fatalf("old payment exception=%s", got.ExceptionCode)
+		}
+	}
+	if err := db.First(order, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.PaidAt != nil || order.Status != constants.OrderStatusPendingPayment {
+		t.Fatal("small old link fulfilled full order")
+	}
+	if err := db.First(&account, account.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !account.Balance.Decimal.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("refund plus one genuine receipt must equal 100, got %s", account.Balance.String())
+	}
+	if err := db.First(second.Payment, second.Payment.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if second.Payment.Status != constants.PaymentStatusPending {
+		t.Fatal("underpayment expired the valid replacement")
+	}
+	callback(second.Payment, "NEW-REAL-RECEIPT")
+	if err := db.First(order, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.PaidAt == nil {
+		t.Fatal("full verified replacement failed to pay order")
+	}
+	if lookups.Load() < 2 {
+		t.Fatal("real callback path did not independently query gateway")
+	}
+}
+
+func TestWalletAllocationCyclesAlwaysDebitAgain(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	order, _ := createCoverageFixture(t, db, "100", "100", "0", "CNY", "CNY", nil)
+	account := walletdomain.Account{UserID: order.UserID, Balance: coverageMoney("99")}
+	if err := db.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	channel := newEpayVerifyChannel("https://synthetic.invalid")
+	channel.ID = 0
+	channel.IsActive = true
+	channel.InteractionMode = constants.PaymentInteractionRedirect
+	if err := db.Create(channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	for cycle := 0; cycle < 2; cycle++ {
+		for _, useBalance := range []bool{true, false} {
+			if _, err := svc.CreatePayment(CreatePaymentInput{OrderID: order.ID, ChannelID: channel.ID, UseBalance: useBalance}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.First(&account, account.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			want := decimal.NewFromInt(99)
+			if useBalance {
+				want = decimal.Zero
+			}
+			if !account.Balance.Decimal.Equal(want) {
+				t.Fatalf("cycle %d useBalance %v wallet=%s want %s", cycle, useBalance, account.Balance.String(), want.String())
+			}
+		}
+	}
+}
+
+func TestFailedCallbackOnlyReleasesCurrentWalletAllocation(t *testing.T) {
+	for _, status := range []string{constants.PaymentStatusFailed, constants.PaymentStatusExpired} {
+		for _, tc := range []struct {
+			name, payable, replacement string
+			wantRelease                bool
+		}{
+			{"current failure releases", "1", "", true},
+			{"old amount cannot release", "100", "", false},
+			{"pending replacement retains", "1", constants.PaymentStatusPending, false},
+			{"initiated replacement retains", "1", constants.PaymentStatusInitiated, false},
+		} {
+			t.Run(status+"/"+tc.name, func(t *testing.T) {
+				svc, db := setupPaymentServiceWalletTest(t)
+				order, payment := createCoverageFixture(t, db, "100", tc.payable, "0", "CNY", "CNY", nil)
+				order.WalletPaidAmount = coverageMoney("99")
+				if err := db.Save(order).Error; err != nil {
+					t.Fatal(err)
+				}
+				account := walletdomain.Account{UserID: order.UserID, Balance: coverageMoney("0")}
+				if err := db.Create(&account).Error; err != nil {
+					t.Fatal(err)
+				}
+				if tc.replacement != "" {
+					replacement := *payment
+					replacement.ID, replacement.Status, replacement.GatewayOrderNo = 0, tc.replacement, payment.GatewayOrderNo+"-REPLACEMENT"
+					if err := db.Create(&replacement).Error; err != nil {
+						t.Fatal(err)
+					}
+				}
+				for repeat := 0; repeat < 2; repeat++ {
+					if _, err := svc.HandleCallback(coverageCallback(payment, status)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := db.First(order, order.ID).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := db.First(&account, account.ID).Error; err != nil {
+					t.Fatal(err)
+				}
+				wantAllocation, wantBalance := decimal.NewFromInt(99), decimal.Zero
+				if tc.wantRelease {
+					wantAllocation, wantBalance = decimal.Zero, decimal.NewFromInt(99)
+				}
+				if !order.WalletPaidAmount.Decimal.Equal(wantAllocation) || !account.Balance.Decimal.Equal(wantBalance) {
+					t.Fatalf("wallet allocation=%s balance=%s, want %s/%s", order.WalletPaidAmount, account.Balance, wantAllocation, wantBalance)
+				}
+			})
+		}
+	}
+}
+
+func TestClosedOrderSuccessIsRecordedWithoutReopening(t *testing.T) {
+	for _, status := range []string{constants.OrderStatusCanceled, constants.OrderStatusRefunded, constants.OrderStatusCompleted} {
+		t.Run(status, func(t *testing.T) {
+			svc, db := setupPaymentServiceWalletTest(t)
+			order, payment := createCoverageFixture(t, db, "100", "100", "0", "CNY", "CNY", nil)
+			order.Status = status
+			if status != constants.OrderStatusCanceled {
+				now := time.Now()
+				order.PaidAt = &now
+			}
+			if err := db.Save(order).Error; err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 2; i++ {
+				updated, err := svc.HandleCallback(coverageCallback(payment, constants.PaymentStatusSuccess))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if updated.ExceptionCode == "" {
+					t.Fatal("closed/duplicate receipt was not flagged")
+				}
+			}
+			if err := db.First(order, order.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if order.Status != status {
+				t.Fatalf("closed order reopened to %s", order.Status)
+			}
+		})
+	}
+}
+
+func TestCallbackCannotInsertOrReplaceCreationSnapshots(t *testing.T) {
+	for _, existing := range []jsonmap.JSON{nil, {"original_amount": "1", "original_currency": "CNY", "exchange_rate": "1", "params": jsonmap.JSON{"money": "1"}}} {
+		incoming := jsonmap.JSON{"original_amount": "100", "original_currency": "USD", "exchange_rate": "0.001", "params": "forged", "mode": "forged", "token": "forged", paymentcontract.GatewayPayloadFiatCurrencySent: "USD", "gateway_order_verified": true}
+		merged := mergeProviderPayload(existing, incoming)
+		for _, key := range []string{"original_amount", "original_currency", "exchange_rate", "params", "mode", "token", paymentcontract.GatewayPayloadFiatCurrencySent} {
+			if fmt.Sprint(merged[key]) != fmt.Sprint(existing[key]) {
+				t.Errorf("callback changed reserved field %s", key)
+			}
+		}
+		if merged["gateway_order_verified"] != true {
+			t.Fatal("local verification marker was discarded")
+		}
+	}
+}
+
+type staleCallbackReadStore struct {
+	paymentcontract.Store
+	stale *paymentdomain.Payment
+}
+
+func (s staleCallbackReadStore) GetByID(id uint) (*paymentdomain.Payment, error) {
+	if id == s.stale.ID {
+		copy := *s.stale
+		return &copy, nil
+	}
+	return s.Store.GetByID(id)
+}
+
+func TestStalePendingSnapshotCannotOverwriteSuccessfulCallback(t *testing.T) {
+	for _, recharge := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recharge_%v", recharge), func(t *testing.T) {
+			svc, db := setupPaymentServiceWalletTest(t)
+			var payment *paymentdomain.Payment
+			var input PaymentCallbackInput
+			if recharge {
+				var record *walletdomain.RechargeOrder
+				payment, record = createWalletRechargeFixture(t, db, constants.PaymentStatusPending, constants.WalletRechargeStatusPending)
+				input = buildWalletRechargeCallbackInput(payment, record, constants.PaymentStatusSuccess, "REAL-RECHARGE")
+			} else {
+				_, payment = createCoverageFixture(t, db, "100", "100", "0", "CNY", "CNY", nil)
+				input = coverageCallback(payment, constants.PaymentStatusSuccess)
+			}
+			stale := *payment
+			if _, err := svc.HandleCallback(input); err != nil {
+				t.Fatal(err)
+			}
+			svc.paymentRepo = staleCallbackReadStore{Store: svc.paymentRepo, stale: &stale}
+			input.Status = constants.PaymentStatusPending
+			if _, err := svc.HandleCallback(input); err != nil {
+				t.Fatal(err)
+			}
+			var actual paymentdomain.Payment
+			if err := db.First(&actual, payment.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if actual.Status != constants.PaymentStatusSuccess || actual.PaidAt == nil {
+				t.Fatal("stale pending read rolled back committed success")
+			}
+			if recharge {
+				var count int64
+				db.Model(&walletdomain.Transaction{}).Where("type = ?", constants.WalletTxnTypeRecharge).Count(&count)
+				if count != 1 {
+					t.Fatalf("recharge credited %d times", count)
+				}
+			}
+		})
+	}
 }

@@ -87,7 +87,7 @@ func (h *Handler) handleEpayCallback(c *gin.Context) bool {
 		"trade_no", strings.TrimSpace(getFirstValue(form, "trade_no")),
 		"trade_status", strings.TrimSpace(getFirstValue(form, "trade_status")))
 
-	payment, err := h.payments.GetByGatewayOrderNo(outTradeNo)
+	payment, err := h.findEpayCallbackPayment(outTradeNo, strings.TrimSpace(getFirstValue(form, "trade_no")))
 	if err != nil || payment == nil {
 		log.Warnw("epay_callback_payment_not_found", "out_trade_no", outTradeNo, "error", err)
 		c.String(http.StatusOK, constants.EpayCallbackFail)
@@ -119,6 +119,30 @@ func (h *Handler) handleEpayCallback(c *gin.Context) bool {
 	log.Infow("epay_callback_processed", "payment_id", payment.ID, "channel_id", channel.ID, "out_trade_no", outTradeNo, "status", updated.Status)
 	c.String(http.StatusOK, constants.EpayCallbackSuccess)
 	return true
+}
+
+// findEpayCallbackPayment also locates payments created before gateway_order_no
+// was persisted. The fallback only selects legacy epay candidates; the service
+// still verifies the signature, local business order and exact gateway trade.
+func (h *Handler) findEpayCallbackPayment(orderNo, providerRef string) (*paymentdomain.Payment, error) {
+	payment, err := h.payments.GetByGatewayOrderNo(orderNo)
+	if err != nil || payment != nil {
+		return payment, err
+	}
+	for _, ref := range []string{providerRef, orderNo} {
+		if ref == "" {
+			continue
+		}
+		candidate, err := h.payments.GetLatestByProviderRef(ref)
+		if err != nil {
+			return nil, err
+		}
+		if candidate != nil && strings.TrimSpace(candidate.GatewayOrderNo) == "" &&
+			strings.EqualFold(strings.TrimSpace(candidate.ProviderType), constants.PaymentProviderEpay) {
+			return candidate, nil
+		}
+	}
+	return nil, nil
 }
 
 func parseCallbackForm(c *gin.Context) (map[string][]string, error) {

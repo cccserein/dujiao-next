@@ -40,28 +40,6 @@ func (s *PaymentService) handleWalletRechargeCallback(payment *paymentdomain.Pay
 		return nil, err
 	}
 
-	// 幂等处理：已成功状态仅更新回调元信息。
-	if payment.Status == constants.PaymentStatusSuccess {
-		log.Infow("wallet_recharge_callback_idempotent_success",
-			"current_status", payment.Status,
-		)
-		return s.updateCallbackMeta(payment, constants.PaymentStatusSuccess, input)
-	}
-	if payment.Status == status {
-		log.Infow("wallet_recharge_callback_idempotent_same_status",
-			"current_status", payment.Status,
-		)
-		return s.updateCallbackMeta(payment, status, input)
-	}
-	if !canApplyWalletRechargeCallback(payment.Status, recharge.Status, status) {
-		log.Infow("wallet_recharge_callback_ignored_terminal_transition",
-			"current_payment_status", payment.Status,
-			"current_recharge_status", recharge.Status,
-			"target_status", status,
-		)
-		return s.updateCallbackMeta(payment, payment.Status, input)
-	}
-
 	now := time.Now()
 	updated, newlySucceeded, err := s.applyWalletRechargePaymentUpdate(payment, status, input, now)
 	if err != nil {
@@ -113,7 +91,7 @@ func (s *PaymentService) applyWalletRechargePaymentUpdate(payment *paymentdomain
 		rechargeRepo := walletTx.Wallets()
 
 		lockedPayment, err := paymentRepo.GetByIDForUpdate(payment.ID)
-		if err != nil {
+		if err != nil || lockedPayment == nil {
 			return ErrPaymentUpdateFailed
 		}
 		recharge, err := rechargeRepo.GetRechargeOrderByPaymentIDForUpdate(payment.ID)

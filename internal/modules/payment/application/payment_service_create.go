@@ -132,16 +132,6 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 				return err
 			}
 
-			existing, err := paymentRepo.GetLatestPendingByOrderChannel(lockedOrder.ID, channel.ID, time.Now())
-			if err != nil {
-				return ErrPaymentCreateFailed
-			}
-			if existing != nil && hasProviderResult(existing) {
-				reusedPending = true
-				payment = existing
-				order = &lockedOrder
-				return nil
-			}
 		}
 
 		if s.walletSvc != nil {
@@ -157,6 +147,17 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 		}
 
 		onlineAmount := normalizeOrderAmount(lockedOrder.TotalAmount.Decimal.Sub(lockedOrder.WalletPaidAmount.Decimal))
+		if channel != nil && onlineAmount.IsPositive() {
+			existing, err := paymentRepo.GetLatestPendingByOrderChannel(lockedOrder.ID, channel.ID, time.Now())
+			if err != nil {
+				return ErrPaymentCreateFailed
+			}
+			if covered, valid := paymentCoveredOrderAmount(existing, lockedOrder.Currency); existing != nil && hasProviderResult(existing) && valid && covered.Equal(onlineAmount) {
+				reusedPending = true
+				payment, order = existing, &lockedOrder
+				return nil
+			}
+		}
 		if onlineAmount.LessThanOrEqual(decimal.Zero) {
 			walletPaidAmount := normalizeOrderAmount(lockedOrder.WalletPaidAmount.Decimal)
 			paidAt := time.Now()
@@ -170,6 +171,7 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 				FeeRate:         money.FromDecimal(decimal.Zero),
 				FixedFee:        money.FromDecimal(decimal.Zero),
 				FeeAmount:       money.FromDecimal(decimal.Zero),
+				FeePolicy:       constants.PaymentFeePolicyNone,
 				Currency:        lockedOrder.Currency,
 				Status:          constants.PaymentStatusSuccess,
 				CreatedAt:       paidAt,
@@ -181,6 +183,9 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			}
 			if err := s.markOrderPaid(tx, &lockedOrder, paidAt); err != nil {
 				return err
+			}
+			if _, err := paymentRepo.ExpirePendingByOrderIDs([]uint{lockedOrder.ID}, paidAt); err != nil {
+				return ErrPaymentUpdateFailed
 			}
 			orderPaidByWallet = true
 			order = &lockedOrder
@@ -209,6 +214,10 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			feeAmount = feeAmount.Add(onlineAmount.Mul(feeRate).Div(decimal.NewFromInt(100))).Round(2)
 		}
 		payableAmount := onlineAmount.Add(feeAmount).Round(2)
+		feePolicy := constants.PaymentFeePolicyNone
+		if feeAmount.IsPositive() {
+			feePolicy = constants.PaymentFeePolicyCustomerSurcharge
+		}
 		payment = &paymentdomain.Payment{
 			OrderID:         lockedOrder.ID,
 			ChannelID:       channel.ID,
@@ -219,6 +228,7 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			FeeRate:         money.FromDecimal(feeRate),
 			FixedFee:        money.FromDecimal(fixedFee),
 			FeeAmount:       money.FromDecimal(feeAmount),
+			FeePolicy:       feePolicy,
 			Currency:        lockedOrder.Currency,
 			Status:          constants.PaymentStatusInitiated,
 			CreatedAt:       now,

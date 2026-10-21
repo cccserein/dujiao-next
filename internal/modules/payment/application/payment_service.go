@@ -38,6 +38,7 @@ var (
 	ErrPaymentAmountTooLarge               = errors.New("payment amount too large")
 	ErrPaymentGatewayRequestFailed         = errors.New("payment gateway request failed")
 	ErrPaymentGatewayResponseInvalid       = errors.New("payment gateway response invalid")
+	ErrPaymentCallbackUnverified           = errors.New("payment callback unverified")
 	ErrPaymentChannelNotAllowedForProduct  = errors.New("payment channel not allowed for product")
 	ErrPaymentChannelNotAllowedForRecharge = errors.New("payment channel not allowed for wallet recharge")
 	ErrProductFetchFailed                  = errors.New("product fetch failed")

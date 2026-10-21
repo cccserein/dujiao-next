@@ -1,6 +1,7 @@
 package application
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/dujiao-next/internal/constants"
@@ -46,7 +47,10 @@ func (s *Service) ApplyOrderBalance(tx walletcontract.Transaction, input walletc
 	if deduct.GreaterThan(total) {
 		deduct = total
 	}
-	reference := orderReference(input.OrderID, constants.WalletTxnTypeOrderPay)
+	reference, err := orderAllocationReference(repository, input.OrderID, constants.WalletTxnTypeOrderPay)
+	if err != nil {
+		return money.Amount{}, err
+	}
 	existing, err := repository.GetTransactionByReference(reference)
 	if err != nil {
 		return money.Amount{}, err
@@ -97,7 +101,10 @@ func (s *Service) ReleaseOrderBalance(
 		return money.FromDecimal(decimal.Zero), nil
 	}
 	repository := tx.Wallets()
-	reference := orderReference(input.OrderID, input.TransactionType)
+	reference, err := orderAllocationReference(repository, input.OrderID, input.TransactionType)
+	if err != nil {
+		return money.Amount{}, err
+	}
 	existing, err := repository.GetTransactionByReference(reference)
 	if err != nil {
 		return money.Amount{}, err
@@ -140,4 +147,20 @@ func (s *Service) ReleaseOrderBalance(
 		return money.Amount{}, walletcontract.ErrTransactionCreateFailed
 	}
 	return transaction.Amount, nil
+}
+
+// Each new allocation/release cycle needs a new ledger reference. The caller's
+// locked order allocation and release claim provide idempotency within a cycle.
+func orderAllocationReference(repository walletcontract.Repository, orderID uint, action string) (string, error) {
+	_, count, err := repository.ListTransactions(walletcontract.TransactionListFilter{
+		OrderID: orderID, Type: action, Page: 1, PageSize: 1,
+	})
+	if err != nil {
+		return "", err
+	}
+	base := orderReference(orderID, action)
+	if count == 0 {
+		return base, nil
+	}
+	return fmt.Sprintf("%s:%d", base, count+1), nil
 }

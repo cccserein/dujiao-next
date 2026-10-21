@@ -38,6 +38,14 @@ const (
 	PaymentStatusExpired   = "expired"
 )
 
+// 支付创建时手续费策略常量
+const (
+	PaymentFeePolicyNone                    = "none"
+	PaymentFeePolicyMerchantAbsorbed        = "merchant_absorbed"
+	PaymentFeePolicyCustomerSurcharge       = "customer_surcharge"
+	PaymentFeePolicyLegacyCustomerSurcharge = "legacy_customer_surcharge"
+)
+
 // 支付提供方常量
 const (
 	PaymentProviderOfficial  = "official"
@@ -104,14 +112,23 @@ const (
 	PaymentDujiaoPayOrderModeCashier     = "cashier"
 )
 
+// 支付异常原因常量
+const (
+	PaymentExceptionUnderpaidSucceeded    = "underpaid_succeeded"
+	PaymentExceptionDuplicateSucceeded    = "duplicate_succeeded"
+	PaymentExceptionClosedOrderSucceeded  = "closed_order_succeeded"
+	PaymentExceptionInvalidAmountSnapshot = "invalid_amount_snapshot"
+)
+
 // 钱包交易类型常量
 const (
-	WalletTxnTypeRecharge    = "recharge"
-	WalletTxnTypeOrderPay    = "order_pay"
-	WalletTxnTypeOrderRefund = "order_refund"
-	WalletTxnTypeAdminAdjust = "admin_adjust"
-	WalletTxnTypeAdminRefund = "admin_refund"
-	WalletTxnTypeGiftCard    = "gift_card_redeem"
+	WalletTxnTypeRecharge             = "recharge"
+	WalletTxnTypeOrderPay             = "order_pay"
+	WalletTxnTypeOrderRefund          = "order_refund"
+	WalletTxnTypeAdminAdjust          = "admin_adjust"
+	WalletTxnTypeAdminRefund          = "admin_refund"
+	WalletTxnTypeGiftCard             = "gift_card_redeem"
+	WalletTxnTypeOrderUnderpaidCredit = "order_underpaid_credit"
 )
 
 // 钱包交易方向常量

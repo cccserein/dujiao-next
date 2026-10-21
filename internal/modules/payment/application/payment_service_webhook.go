@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -74,6 +75,10 @@ func (s *PaymentService) HandleSyncCallback(
 		Currency:    strings.ToUpper(strings.TrimSpace(result.Currency)),
 		PaidAt:      result.PaidAt,
 		Payload:     payload,
+	}
+	// 验签通过不等于钱到账：成功回调必须先过网关复核才能落库发货。
+	if err := s.corroborateSuccessCallback(channel, payment, callbackInput); err != nil {
+		return nil, err
 	}
 	return s.HandleCallback(callbackInput)
 }
@@ -367,6 +372,18 @@ func (s *PaymentService) commitVerifiedWebhook(
 		verifiedLegacyDujiaoPayCurrency: verifiedLegacyCurrency,
 	}
 
+	// 验签通过不等于钱到账：成功回调必须先过网关复核才能落库发货。
+	if err := s.corroborateSuccessCallback(channel, payment, callbackInput); err != nil {
+		log.Warnw("payment_webhook_corroboration_rejected",
+			"channel_id", channel.ID,
+			"payment_id", payment.ID,
+			"order_no", result.OrderNo,
+			"provider_ref", result.ProviderRef,
+			"error", err,
+		)
+		return nil, result.Status, err
+	}
+
 	updated, err := s.HandleCallback(callbackInput)
 	if err != nil {
 		log.Errorw("payment_webhook_callback_apply_failed",
@@ -422,6 +439,15 @@ func (s *PaymentService) findWebhookPayment(channelID uint, result *paymentcontr
 			return payment, nil
 		}
 	}
+	// 早期 redirect 记录用业务单号占位 ProviderRef，尚无 GatewayOrderNo。
+	// 这里只定位候选；复核仍必须与本地业务单号及网关真实流水完全一致。
+	if orderNo := strings.TrimSpace(result.OrderNo); orderNo != "" {
+		payment, err := s.paymentRepo.GetLatestByProviderRef(orderNo)
+		if err == nil && payment != nil && payment.ChannelID == channelID &&
+			payment.ProviderType == constants.PaymentProviderEpay && strings.TrimSpace(payment.GatewayOrderNo) == "" {
+			return payment, nil
+		}
+	}
 	return nil, ErrPaymentNotFound
 }
 
@@ -443,4 +469,161 @@ func (s *PaymentService) HandleStripeWebhook(input WebhookCallbackInput) (*payme
 		constants.PaymentProviderOfficial,
 		constants.PaymentChannelTypeStripe,
 	)
+}
+
+// corroborateSuccessCallback 在"支付成功"回调落库、发货之前，主动向网关复核这笔支付。
+//
+// 为什么需要它：回调签名只能证明内容出自持有商户密钥的一方，不能证明钱真的到账。
+// 商户密钥一旦泄露（线上发生过：攻击者用真实 merchant_key 构造 sign 完全合法的
+// 回调，把未支付订单刷成已支付并提走卡密），单靠验签无法拦住。因此凡支持主动
+// 查询的渠道，成功回调必须由网关返回"已收款"才放行；查询不到或查询失败一律拒绝
+// （网关会重试回调，宁可在途也不发货）。
+//
+// 校验通过返回 nil；不通过返回包装了 ErrPaymentCallbackUnverified 的错误。
+// 易支付必须具备查询能力。其他尚未接入此能力的渠道保留各自的验签流程；
+// 已接入的适配器返回“不支持”时也必须拒绝，不能退回仅凭签名放行。
+func (s *PaymentService) corroborateSuccessCallback(
+	channel *paymentdomain.PaymentChannel,
+	payment *paymentdomain.Payment,
+	input PaymentCallbackInput,
+) error {
+	if channel == nil || payment == nil {
+		return ErrPaymentInvalid
+	}
+	if normalizePaymentStatus(input.Status) != constants.PaymentStatusSuccess {
+		return nil
+	}
+	if s.paymentProviderRegistry == nil {
+		return ErrPaymentProviderNotSupported
+	}
+
+	log := paymentLogger(
+		"payment_id", payment.ID,
+		"channel_id", channel.ID,
+		"provider_type", channel.ProviderType,
+		"channel_type", channel.ChannelType,
+		"gateway_order_no", strings.TrimSpace(payment.GatewayOrderNo),
+		"payment_amount", payment.Amount.String(),
+		"payment_currency", payment.Currency,
+	)
+
+	provider, ok := s.paymentProviderRegistry.Lookup(channel.ProviderType, channel.ChannelType)
+	if !ok {
+		return ErrPaymentProviderNotSupported
+	}
+	corroborator, ok := provider.(paymentcontract.CallbackCorroborator)
+	if !ok {
+		if strings.EqualFold(strings.TrimSpace(channel.ProviderType), constants.PaymentProviderEpay) {
+			return fmt.Errorf("%w: independent gateway query unavailable", ErrPaymentCallbackUnverified)
+		}
+		log.Warnw("payment_callback_corroboration_unsupported",
+			"reason", "provider has no active query capability",
+		)
+		return nil
+	}
+	if payment.ChannelID != channel.ID || input.ChannelID != channel.ID || input.PaymentID != payment.ID {
+		return ErrPaymentInvalid
+	}
+	if !input.Amount.Decimal.IsPositive() || !input.Amount.Decimal.Equal(payment.Amount.Decimal) {
+		return ErrPaymentAmountMismatch
+	}
+	if strings.TrimSpace(input.Currency) == "" || !strings.EqualFold(strings.TrimSpace(input.Currency), strings.TrimSpace(payment.Currency)) {
+		return ErrPaymentCurrencyMismatch
+	}
+	orderNo, err := s.corroborationOrderNo(payment)
+	if err != nil {
+		return err
+	}
+	if orderNo == "" || strings.TrimSpace(input.OrderNo) != orderNo {
+		return ErrPaymentInvalid
+	}
+	providerRef := strings.TrimSpace(input.ProviderRef)
+	if providerRef == "" {
+		return fmt.Errorf("%w: missing gateway transaction", ErrPaymentCallbackUnverified)
+	}
+	// 已结算记录仅允许同一笔流水的幂等回调，不能重写成另一笔交易。
+	if payment.Status == constants.PaymentStatusSuccess {
+		if providerRef != strings.TrimSpace(payment.ProviderRef) {
+			return ErrPaymentInvalid
+		}
+		return nil
+	}
+
+	ctx, cancel := detachOutboundRequestContext(context.Background())
+	defer cancel()
+
+	result, err := corroborator.CorroboratePayment(ctx, channel.ConfigJSON, paymentcontract.CorroborateInput{
+		OrderNo:     orderNo,
+		ProviderRef: providerRef,
+		Amount:      payment.Amount,
+		Currency:    payment.Currency,
+	})
+	if err != nil {
+		log.Errorw("payment_callback_corroboration_query_failed", "error", err)
+		return fmt.Errorf("%w: gateway query failed", ErrPaymentCallbackUnverified)
+	}
+
+	if result == nil {
+		log.Errorw("payment_callback_corroboration_empty_result")
+		return fmt.Errorf("%w: gateway returned empty result", ErrPaymentCallbackUnverified)
+	}
+
+	gatewayStatus := normalizePaymentStatus(result.Status)
+	if gatewayStatus != constants.PaymentStatusSuccess {
+		log.Warnw("payment_callback_corroboration_not_paid",
+			"gateway_status", result.Status,
+			"gateway_provider_ref", result.ProviderRef,
+		)
+		return fmt.Errorf("%w: gateway reports status %q", ErrPaymentCallbackUnverified, strings.TrimSpace(result.Status))
+	}
+
+	// 金额是第二道闸：即便网关确认"已支付"，收到的钱少于应收也不能发货。
+	if !result.Amount.Decimal.IsPositive() || !result.Amount.Decimal.Equal(payment.Amount.Decimal) {
+		log.Warnw("payment_callback_corroboration_amount_mismatch",
+			"gateway_amount", result.Amount.String(),
+			"expected_amount", payment.Amount.String(),
+		)
+		return fmt.Errorf("%w: gateway amount %s != expected %s",
+			ErrPaymentCallbackUnverified, result.Amount.String(), payment.Amount.String())
+	}
+	if strings.TrimSpace(result.ProviderRef) != providerRef ||
+		strings.TrimSpace(result.Currency) == "" ||
+		!strings.EqualFold(strings.TrimSpace(result.Currency), strings.TrimSpace(payment.Currency)) {
+		return fmt.Errorf("%w: gateway transaction or currency mismatch", ErrPaymentCallbackUnverified)
+	}
+	if input.Payload != nil {
+		input.Payload["gateway_order_verified"] = true
+		input.Payload["gateway_order_verified_at"] = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	log.Infow("payment_callback_corroborated",
+		"gateway_provider_ref", result.ProviderRef,
+		"gateway_amount", result.Amount.String(),
+	)
+	return nil
+}
+
+// corroborationOrderNo 从本地订单恢复旧支付的商户单号；网关流水号不能充当商户单号。
+func (s *PaymentService) corroborationOrderNo(payment *paymentdomain.Payment) (string, error) {
+	if orderNo := strings.TrimSpace(payment.GatewayOrderNo); orderNo != "" {
+		return orderNo, nil
+	}
+	if payment.OrderID != 0 {
+		if s.orderRepo == nil {
+			return "", ErrPaymentUpdateFailed
+		}
+		order, err := s.orderRepo.GetByID(payment.OrderID)
+		if err != nil || order == nil {
+			return "", ErrPaymentUpdateFailed
+		}
+		return strings.TrimSpace(order.OrderNo), nil
+	}
+	if s.walletRepo == nil {
+		return "", ErrPaymentUpdateFailed
+	}
+	recharge, err := s.walletRepo.GetRechargeOrderByPaymentID(payment.ID)
+	if err != nil || recharge == nil {
+		return "", ErrPaymentUpdateFailed
+	}
+	return strings.TrimSpace(recharge.RechargeNo), nil
 }
