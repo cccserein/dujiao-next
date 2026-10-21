@@ -1,0 +1,162 @@
+--- a/app/model/trade.go
++++ b/app/model/trade.go
+@@ -181,6 +181,9 @@
+ }
+ 
+ func RebuildOrder(t Order, p OrderParams) (Order, error) {
++	if t.Status != OrderStatusWaiting || !time.Now().Before(t.ExpiredAt) {
++		return t, fmt.Errorf("order is no longer payable")
++	}
+ 	if p.OrderId == t.OrderId && p.TradeType == t.TradeType && p.Money.String() == t.Money && p.Fiat == t.Fiat {
+ 		return t, nil
+ 	}
+@@ -202,9 +205,10 @@
+ 	t.Money = p.Money.String()
+ 	t.TradeType = p.TradeType
+ 	t.Rate = fmt.Sprintf("%v", data.Rate)
+-	t.ExpiredAt = CalcTradeExpiredAt(p.Timeout)
+-
+-	query := Db.Model(&Order{}).Where("id = ?", t.ID)
++	// A payment-method switch must retain the original absolute deadline.
++	// CalcTradeExpiredAt would reset the last 179 seconds to the default timeout.
++
++	query := Db.Model(&Order{}).Where("id = ? AND status = ? AND expired_at > ?", t.ID, OrderStatusWaiting, time.Now())
+ 	if p.ClientFingerprint != "" {
+ 		query = query.Where("(client_fingerprint = '' OR client_fingerprint = ?)", p.ClientFingerprint)
+ 	}
+@@ -218,14 +222,13 @@
+ 		"money":              t.Money,
+ 		"trade_type":         t.TradeType,
+ 		"rate":               t.Rate,
+-		"expired_at":         t.ExpiredAt,
+ 		"client_fingerprint": t.ClientFingerprint,
+ 	})
+ 	if res.Error != nil {
+ 		return t, res.Error
+ 	}
+ 	if res.RowsAffected == 0 {
+-		return t, fmt.Errorf("client fingerprint mismatch")
++		return t, fmt.Errorf("order is no longer payable or client fingerprint mismatch")
+ 	}
+ 
+ 	return t, nil
+--- /dev/null
++++ b/app/model/trade_deadline_test.go
+@@ -0,0 +1,117 @@
++package model
++
++import (
++	"fmt"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/glebarez/sqlite"
++	"github.com/shopspring/decimal"
++	"gorm.io/gorm"
++)
++
++func deadlineTestDB(t *testing.T) {
++	t.Helper()
++	previous := Db
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "deadline.db")), &gorm.Config{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	Db = db
++	connection, err := db.DB()
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = connection.Close(); Db = previous })
++	if err := db.AutoMigrate(&Conf{}, &Rate{}, &Wallet{}, &Order{}); err != nil {
++		t.Fatal(err)
++	}
++	for _, row := range []Conf{{K: PaymentTimeout, V: "1200"}, {K: "atom_usdt", V: "0.01"}} {
++		if err := db.Create(&row).Error; err != nil {
++			t.Fatal(err)
++		}
++	}
++	now := time.Now()
++	stamp := AutoTimeAt{CreatedAt: (*Datetime)(&now), UpdatedAt: (*Datetime)(&now)}
++	rate := Rate{Fiat: string(CNY), Crypto: string(USDT), Rate: "7", RawRate: 7, AutoTimeAt: stamp}
++	if err := db.Create(&rate).Error; err != nil {
++		t.Fatal(err)
++	}
++	for _, kind := range []TradeType{UsdtTrc20, UsdtBep20} {
++		wallet := Wallet{Name: "sandbox", Status: WaStatusEnable, Address: "sandbox-address-" + string(kind), MatchAddr: "sandbox-match-" + string(kind), TradeType: string(kind), AutoTimeAt: stamp}
++		if err := db.Create(&wallet).Error; err != nil {
++			t.Fatal(err)
++		}
++	}
++}
++
++func deadlineTestOrder(t *testing.T, remaining time.Duration) Order {
++	t.Helper()
++	now := time.Now()
++	zero := time.Unix(0, 0)
++	order := Order{OrderId: "sandbox-order", TradeId: "sandbox-trade", Status: OrderStatusWaiting,
++		Fiat: CNY, Crypto: USDT, Money: "35", ApiType: OrderApiTypeEpusdtOrder,
++		ExpiredAt: now.Add(remaining), ConfirmedAt: &zero,
++		AutoTimeAt: AutoTimeAt{CreatedAt: (*Datetime)(&now), UpdatedAt: (*Datetime)(&now)}}
++	if err := Db.Create(&order).Error; err != nil {
++		t.Fatal(err)
++	}
++	return order
++}
++
++func TestRebuildOrderRetainsDeadlineAcrossNetworkSwitches(t *testing.T) {
++	for _, seconds := range []int{600, 179, 1} {
++		t.Run(fmt.Sprint(seconds), func(t *testing.T) {
++			deadlineTestDB(t)
++			order := deadlineTestOrder(t, time.Duration(seconds)*time.Second)
++			deadline := order.ExpiredAt
++			for _, kind := range []TradeType{UsdtTrc20, UsdtBep20, UsdtTrc20} {
++				var err error
++				order, err = RebuildOrder(order, OrderParams{OrderId: order.OrderId, TradeType: kind, Money: decimal.NewFromInt(35), Fiat: CNY, Timeout: 1200, ClientFingerprint: "sandbox-browser"})
++				if err != nil {
++					t.Fatal(err)
++				}
++				var stored Order
++				if err := Db.First(&stored, order.ID).Error; err != nil {
++					t.Fatal(err)
++				}
++				if !stored.ExpiredAt.Equal(deadline) || !order.ExpiredAt.Equal(deadline) {
++					t.Fatal("network switch extended the original deadline")
++				}
++				if stored.TradeType != kind {
++					t.Fatal("payment method did not change")
++				}
++			}
++		})
++	}
++}
++
++func TestRebuildOrderRejectsExpiredAndConcurrentlyClosedOrders(t *testing.T) {
++	for _, status := range []int{OrderStatusSuccess, OrderStatusCanceled, OrderStatusExpired, OrderStatusConfirming} {
++		t.Run(fmt.Sprint(status), func(t *testing.T) {
++			deadlineTestDB(t)
++			order := deadlineTestOrder(t, 10*time.Minute)
++			if err := Db.Model(&Order{}).Where("id = ?", order.ID).Update("status", status).Error; err != nil {
++				t.Fatal(err)
++			}
++			_, err := RebuildOrder(order, OrderParams{OrderId: order.OrderId, TradeType: UsdtBep20, Money: decimal.NewFromInt(35), Fiat: CNY, Timeout: 1200})
++			if err == nil {
++				t.Fatal("stale waiting order changed a closed payment")
++			}
++			var stored Order
++			if err := Db.First(&stored, order.ID).Error; err != nil {
++				t.Fatal(err)
++			}
++			if stored.Status != status || stored.TradeType != "" {
++				t.Fatal("closed payment was changed")
++			}
++		})
++	}
++	deadlineTestDB(t)
++	order := deadlineTestOrder(t, -time.Second)
++	_, err := RebuildOrder(order, OrderParams{OrderId: order.OrderId, Money: decimal.NewFromInt(35), Fiat: CNY})
++	if err == nil {
++		t.Fatal("expired payment accepted even for an unchanged method")
++	}
++}
