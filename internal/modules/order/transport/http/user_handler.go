@@ -143,6 +143,7 @@ func (h *UserHandler) OrderStats(c *gin.Context) {
 
 // GetOrderByOrderNo 按订单号获取订单详情
 func (h *UserHandler) GetOrderByOrderNo(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	uid, ok := ginutil.GetUserID(c)
 	if !ok {
 		return

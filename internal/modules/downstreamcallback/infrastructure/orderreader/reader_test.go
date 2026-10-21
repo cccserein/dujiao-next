@@ -14,6 +14,32 @@ type sourceStub struct {
 	order *orderdomain.Order
 }
 
+func TestReaderDoesNotProjectRevokedDelivery(t *testing.T) {
+	for _, status := range []string{"refunded", "canceled", "pending_payment", "unknown"} {
+		t.Run(status, func(t *testing.T) {
+			order := &orderdomain.Order{ID: 1, Status: status,
+				Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-CARD", LogisticsJSON: jsonmap.JSON{"code": "FAKE-CODE"}},
+				Children:    []orderdomain.Order{{ID: 2, Status: "completed", Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-CHILD"}}},
+			}
+			got, err := New(sourceStub{order: order}).GetByID(1)
+			if err != nil || got == nil {
+				t.Fatalf("read: %v", err)
+			}
+			if got.Fulfillment != nil || got.Children[0].Fulfillment != nil {
+				t.Error("revoked parent still exposes delivery through callback projection")
+			}
+		})
+	}
+	order := &orderdomain.Order{Status: "partially_refunded", Children: []orderdomain.Order{
+		{Status: "refunded", Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-REVOKED"}},
+		{Status: "completed", Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-VALID"}},
+	}}
+	got, err := New(sourceStub{order: order}).GetByID(1)
+	if err != nil || got.Children[0].Fulfillment != nil || got.Children[1].Fulfillment == nil {
+		t.Fatal("partially refunded callback must retain only entitled children")
+	}
+}
+
 func (s sourceStub) GetByID(uint) (*orderdomain.Order, error) {
 	return s.order, nil
 }

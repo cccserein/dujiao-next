@@ -33,6 +33,10 @@ func (r *Reader) GetByID(id uint) (*downstreamcontract.OrderSnapshot, error) {
 }
 
 func projectOrder(order *orderdomain.Order) *downstreamcontract.OrderSnapshot {
+	return projectEntitledOrder(order, true)
+}
+
+func projectEntitledOrder(order *orderdomain.Order, parentEntitled bool) *downstreamcontract.OrderSnapshot {
 	if order == nil {
 		return nil
 	}
@@ -42,7 +46,8 @@ func projectOrder(order *orderdomain.Order) *downstreamcontract.OrderSnapshot {
 		ParentID: order.ParentID,
 		Status:   order.Status,
 	}
-	if order.Fulfillment != nil {
+	entitled := parentEntitled && order.CanReadFulfillment()
+	if entitled && order.Fulfillment != nil {
 		projection.Fulfillment = &downstreamcontract.Fulfillment{
 			Type:         order.Fulfillment.Type,
 			Status:       order.Fulfillment.Status,
@@ -53,7 +58,7 @@ func projectOrder(order *orderdomain.Order) *downstreamcontract.OrderSnapshot {
 	}
 	projection.Children = make([]downstreamcontract.OrderSnapshot, 0, len(order.Children))
 	for i := range order.Children {
-		child := projectOrder(&order.Children[i])
+		child := projectEntitledOrder(&order.Children[i], entitled)
 		if child != nil {
 			projection.Children = append(projection.Children, *child)
 		}

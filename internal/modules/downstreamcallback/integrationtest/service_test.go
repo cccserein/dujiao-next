@@ -6,10 +6,65 @@ import (
 	"testing"
 	"time"
 
+	credentialdomain "github.com/dujiao-next/internal/modules/apicredential/domain"
+	credentialreader "github.com/dujiao-next/internal/modules/downstreamcallback/infrastructure/credentialreader"
+	orderreader "github.com/dujiao-next/internal/modules/downstreamcallback/infrastructure/orderreader"
+	fulfillmentdomain "github.com/dujiao-next/internal/modules/fulfillment/domain"
+	userdomain "github.com/dujiao-next/internal/modules/identity/user/domain"
+	orderdomain "github.com/dujiao-next/internal/modules/order/domain"
+
 	downstreamapp "github.com/dujiao-next/internal/modules/downstreamcallback/application"
 	downstreamcontract "github.com/dujiao-next/internal/modules/downstreamcallback/contract"
 	downstreamdomain "github.com/dujiao-next/internal/modules/downstreamcallback/domain"
 )
+
+type liveOrderSource struct{ order *orderdomain.Order }
+
+func (s *liveOrderSource) GetByID(uint) (*orderdomain.Order, error) { return s.order, nil }
+
+type liveCredentialSource struct {
+	credential *credentialdomain.ApiCredential
+}
+
+func (s *liveCredentialSource) GetByID(uint) (*credentialdomain.ApiCredential, error) {
+	return s.credential, nil
+}
+func (s *liveCredentialSource) GetByApiKey(string) (*credentialdomain.ApiCredential, error) {
+	return s.credential, nil
+}
+
+func TestRetriedCallbackRechecksOrderAndCredential(t *testing.T) {
+	ref := &downstreamdomain.OrderRef{ID: 3, OrderID: 8, ApiCredentialID: 5, CallbackURL: "https://callback.example.test"}
+	references := &refRepositoryStub{byID: map[uint]*downstreamdomain.OrderRef{3: ref}}
+	orders := &liveOrderSource{order: &orderdomain.Order{ID: 8, Status: "completed", Fulfillment: &fulfillmentdomain.Fulfillment{Status: "delivered", Payload: "FAKE-CARD"}}}
+	credentials := &liveCredentialSource{credential: &credentialdomain.ApiCredential{ID: 5, UserID: 7, Status: "approved", IsActive: true, ApiKey: "fake-key", ApiSecret: "fake-secret", User: &userdomain.User{ID: 7, Status: "active"}}}
+	deliverer := &delivererStub{err: errors.New("synthetic network outage")}
+	service := newService(references, orderreader.New(orders), credentialreader.New(credentials), &callbackQueueStub{}, deliverer)
+	if err := service.SendCallback(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	if deliverer.calls != 1 || deliverer.request.Payload.Fulfillment == nil {
+		t.Fatal("valid delivery did not reach sender")
+	}
+	// The first send failed; refund before the queued retry is consumed.
+	orders.order.Status = "refunded"
+	deliverer.err = nil
+	if err := service.SendCallback(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	if deliverer.calls != 2 || deliverer.request.Payload.Fulfillment != nil || deliverer.request.Payload.Status != "refunded" {
+		t.Fatal("refund retry leaked the previously stored card")
+	}
+	// A credential disabled while queued must stop all subsequent delivery.
+	orders.order.Status = "completed"
+	credentials.credential.IsActive = false
+	if err := service.SendCallback(context.Background(), 3); err == nil {
+		t.Fatal("disabled callback credential should fail closed")
+	}
+	if deliverer.calls != 2 {
+		t.Fatal("callback sent after credential revocation")
+	}
+}
 
 type refRepositoryStub struct {
 	byID      map[uint]*downstreamdomain.OrderRef

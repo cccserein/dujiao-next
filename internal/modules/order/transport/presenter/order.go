@@ -120,10 +120,10 @@ func NewOrderDetail(o *orderdomain.Order) OrderDetail {
 		CanceledAt:              o.CanceledAt,
 		CreatedAt:               o.CreatedAt,
 	}
-	paid := o.PaidAt != nil
+	paid := o.PaidAt != nil && o.CanReadFulfillment()
 	for _, item := range o.Items {
 		resp := newOrderItemResp(&item)
-		if !paid {
+		if !paid || !o.CanReadItemInstructions(item.ID) {
 			resp.Instructions = nil
 		}
 		d.Items = append(d.Items, resp)
@@ -142,6 +142,9 @@ func NewOrderDetail(o *orderdomain.Order) OrderDetail {
 }
 
 func maskFulfillmentContent(d *OrderDetail) {
+	for i := range d.Items {
+		d.Items[i].Instructions = nil
+	}
 	if d.Fulfillment != nil {
 		d.Fulfillment.Payload = ""
 		d.Fulfillment.PayloadLineCount = 0

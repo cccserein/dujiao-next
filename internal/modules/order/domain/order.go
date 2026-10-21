@@ -73,6 +73,29 @@ func (o *Order) CanReadFulfillment() bool {
 	}
 }
 
+// CanReadItemInstructions also checks the owning child for aggregated parent
+// items. An item from a refunded child must not regain access via its parent.
+func (o *Order) CanReadItemInstructions(itemID uint) bool {
+	if !o.CanReadFulfillment() {
+		return false
+	}
+	if len(o.Children) == 0 {
+		return true
+	}
+	for i := range o.Children {
+		child := &o.Children[i]
+		if !child.CanReadFulfillment() {
+			continue
+		}
+		for _, item := range child.Items {
+			if itemID != 0 && item.ID == itemID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // StripCostPrice 清除订单项中的成本价信息，避免前台用户看到成本价。
 func (o *Order) StripCostPrice() {
 	for i := range o.Items {

@@ -87,6 +87,7 @@ func (h *GuestHandler) ListGuestOrders(c *gin.Context) {
 
 // GetGuestOrderByOrderNo 按订单号获取游客订单详情
 func (h *GuestHandler) GetGuestOrderByOrderNo(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	email, password, ok := ginutil.GetGuestCredentials(c)
 	if !ok || email == "" {
 		ginutil.RespondError(c, response.CodeBadRequest, "error.guest_email_required", nil)

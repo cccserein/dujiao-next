@@ -16,11 +16,16 @@ import (
 )
 
 func TestRefundedOrderDetailHidesStoredDelivery(t *testing.T) {
+	now := time.Now()
 	order := &orderdomain.Order{
 		Status:      "refunded",
+		PaidAt:      &now,
+		Items:       []orderdomain.OrderItem{{InstructionsJSON: jsonmap.JSON{"en-US": "PRIVATE-INSTRUCTIONS"}}},
 		Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-CARD", PayloadLineCount: 1},
 		Children: []orderdomain.Order{{
 			Status:      "delivered",
+			PaidAt:      &now,
+			Items:       []orderdomain.OrderItem{{InstructionsJSON: jsonmap.JSON{"en-US": "PRIVATE-CHILD-INSTRUCTIONS"}}},
 			Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "CHILD-FAKE-CARD", PayloadLineCount: 1},
 		}},
 	}
@@ -28,10 +33,34 @@ func TestRefundedOrderDetailHidesStoredDelivery(t *testing.T) {
 	if detail.Fulfillment == nil || detail.Fulfillment.Payload != "" || detail.Children[0].Fulfillment.Payload != "" {
 		t.Fatal("refunded order exposed stored delivery content")
 	}
+	if detail.Items[0].Instructions != nil || detail.Children[0].Items[0].Instructions != nil {
+		t.Fatal("refunded parent exposed private instructions")
+	}
 	order.Status = "delivered"
 	detail = NewOrderDetail(order)
 	if detail.Fulfillment.Payload != "FAKE-CARD" {
 		t.Fatal("paid order delivery content was hidden")
+	}
+}
+
+func TestPartiallyRefundedDetailHidesAggregatedRevokedInstructions(t *testing.T) {
+	now := time.Now()
+	revoked := orderdomain.OrderItem{ID: 11, InstructionsJSON: jsonmap.JSON{"en-US": "REVOKED-INSTRUCTIONS"}}
+	valid := orderdomain.OrderItem{ID: 12, InstructionsJSON: jsonmap.JSON{"en-US": "VALID-INSTRUCTIONS"}}
+	order := &orderdomain.Order{Status: "partially_refunded", PaidAt: &now,
+		Items: []orderdomain.OrderItem{revoked, valid},
+		Children: []orderdomain.Order{
+			{Status: "refunded", PaidAt: &now, Items: []orderdomain.OrderItem{revoked}},
+			{Status: "completed", PaidAt: &now, Items: []orderdomain.OrderItem{valid}},
+		},
+	}
+	detail := NewOrderDetail(order)
+	data, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "REVOKED-INSTRUCTIONS") || !strings.Contains(string(data), "VALID-INSTRUCTIONS") {
+		t.Fatal("aggregated parent items bypassed child entitlement")
 	}
 }
 
@@ -159,7 +188,9 @@ func TestOrderDetailHidesInstructionsBeforePayment(t *testing.T) {
 
 	// 已付款：instructions 正常返回
 	now := time.Now()
-	paid := NewOrderDetail(mkOrder(&now))
+	paidOrder := mkOrder(&now)
+	paidOrder.Status = "paid"
+	paid := NewOrderDetail(paidOrder)
 	if paid.Items[0].Instructions == nil {
 		t.Fatal("paid order should expose instructions")
 	}

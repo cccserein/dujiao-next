@@ -83,11 +83,17 @@ func (c *Consumer) handleOrderStatusEmail(ctx context.Context, task *asynq.Task)
 	if status == "" {
 		status = strings.TrimSpace(order.Status)
 	}
-	if status == constants.OrderStatusCanceled {
+	if status == constants.OrderStatusCanceled || order.Status == constants.OrderStatusCanceled {
 		logger.Debugw("worker_order_status_email_skip_canceled",
 			"order_id", order.ID,
 			"order_no", order.OrderNo,
 		)
+		return nil
+	}
+	if !order.CanReadFulfillment() && (status == constants.OrderStatusPaid ||
+		status == constants.OrderStatusFulfilling || status == constants.OrderStatusDelivered ||
+		status == constants.OrderStatusCompleted || status == constants.OrderStatusPartiallyDelivered) {
+		logger.Debugw("worker_order_status_email_skip_revoked_delivery", "order_id", order.ID)
 		return nil
 	}
 	var receiverEmail string
@@ -353,7 +359,7 @@ func (c *Consumer) handleWalletRechargeExpire(_ context.Context, task *asynq.Tas
 
 // buildOrderInstructionsEmailText 收集订单项的交付使用说明（多语言选取 + HTML 去标签 + 去重）。
 func buildOrderInstructionsEmailText(order *orderdomain.Order, locale string) string {
-	if order == nil {
+	if !order.CanReadFulfillment() {
 		return ""
 	}
 	seen := make(map[string]struct{})
@@ -373,10 +379,17 @@ func buildOrderInstructionsEmailText(order *orderdomain.Order, locale string) st
 		seen[plain] = struct{}{}
 		parts = append(parts, plain)
 	}
-	for _, item := range order.Items {
-		add(item.InstructionsJSON)
+	// Parent items can be an aggregate containing refunded child items. Read
+	// children directly so each entitlement is checked before including text.
+	if len(order.Children) == 0 {
+		for _, item := range order.Items {
+			add(item.InstructionsJSON)
+		}
 	}
 	for _, child := range order.Children {
+		if !child.CanReadFulfillment() {
+			continue
+		}
 		for _, item := range child.Items {
 			add(item.InstructionsJSON)
 		}
@@ -406,7 +419,9 @@ func localizedInstructionsText(raw jsonmap.JSON, locale string) string {
 
 // buildOrderFulfillmentEmailPayload 组装订单状态邮件中的交付内容文本。
 func buildOrderFulfillmentEmailPayload(order *orderdomain.Order) string {
-	if order == nil {
+	// A queued delivery notification may run after cancellation or refund.
+	// The stored payload is not itself proof of a current entitlement.
+	if !order.CanReadFulfillment() {
 		return ""
 	}
 	if order.Fulfillment != nil {
@@ -420,7 +435,7 @@ func buildOrderFulfillmentEmailPayload(order *orderdomain.Order) string {
 	}
 	parts := make([]string, 0, len(order.Children))
 	for _, child := range order.Children {
-		if child.Fulfillment == nil {
+		if !child.CanReadFulfillment() || child.Fulfillment == nil {
 			continue
 		}
 		content := strings.TrimSpace(child.Fulfillment.Payload)

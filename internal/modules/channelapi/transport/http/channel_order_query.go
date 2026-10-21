@@ -272,11 +272,13 @@ func buildChannelOrderDetailResponse(order *orderdomain.Order, locale string) gi
 	}
 
 	orderPaid := order.CanReadFulfillment()
+	entitledItems := make([]orderdomain.OrderItem, 0, len(order.Items))
 	items := make([]gin.H, 0, len(order.Items))
 	for _, item := range order.Items {
 		instructions := ""
-		if orderPaid {
+		if order.CanReadItemInstructions(item.ID) {
 			instructions = resolveLocalizedJSON(item.InstructionsJSON, locale, "zh-CN")
+			entitledItems = append(entitledItems, item)
 		}
 		items = append(items, gin.H{
 			"product_id":           item.ProductID,
@@ -325,7 +327,7 @@ func buildChannelOrderDetailResponse(order *orderdomain.Order, locale string) gi
 
 	parentInstructions := ""
 	if orderPaid {
-		parentInstructions = joinLocalizedInstructions(order.Items, locale)
+		parentInstructions = joinLocalizedInstructions(entitledItems, locale)
 	}
 	if orderPaid && order.Fulfillment != nil {
 		resp["fulfillment_status"] = order.Fulfillment.Status

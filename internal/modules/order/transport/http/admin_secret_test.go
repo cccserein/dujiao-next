@@ -12,11 +12,13 @@ import (
 
 func TestMaskOrderFulfillmentRemovesParentAndChildSecrets(t *testing.T) {
 	order := &orderdomain.Order{
+		Items: []orderdomain.OrderItem{{InstructionsJSON: jsonmap.JSON{"en-US": "PRIVATE-PARENT-INSTRUCTIONS"}}},
 		Fulfillment: &fulfillmentdomain.Fulfillment{
 			Status: "delivered", Payload: "PARENT-CARD-SECRET",
 			LogisticsJSON: jsonmap.JSON{"code": "PARENT-DELIVERY-SECRET"},
 		},
 		Children: []orderdomain.Order{{
+			Items: []orderdomain.OrderItem{{InstructionsJSON: jsonmap.JSON{"en-US": "PRIVATE-CHILD-INSTRUCTIONS"}}},
 			Fulfillment: &fulfillmentdomain.Fulfillment{
 				Status: "delivered", Payload: "CHILD-CARD-SECRET",
 				LogisticsJSON: jsonmap.JSON{"code": "CHILD-DELIVERY-SECRET"},
@@ -28,7 +30,7 @@ func TestMaskOrderFulfillmentRemovesParentAndChildSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal order: %v", err)
 	}
-	for _, secret := range []string{"PARENT-CARD-SECRET", "PARENT-DELIVERY-SECRET", "CHILD-CARD-SECRET", "CHILD-DELIVERY-SECRET"} {
+	for _, secret := range []string{"PARENT-CARD-SECRET", "PARENT-DELIVERY-SECRET", "CHILD-CARD-SECRET", "CHILD-DELIVERY-SECRET", "PRIVATE-PARENT-INSTRUCTIONS", "PRIVATE-CHILD-INSTRUCTIONS"} {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("masked order leaked %s", secret)
 		}

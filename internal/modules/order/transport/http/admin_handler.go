@@ -393,6 +393,9 @@ func maskOrderFulfillment(order *orderdomain.Order) {
 	if order == nil {
 		return
 	}
+	for i := range order.Items {
+		order.Items[i].InstructionsJSON = nil
+	}
 	if order.Fulfillment != nil {
 		order.Fulfillment.Payload = ""
 		order.Fulfillment.LogisticsJSON = nil

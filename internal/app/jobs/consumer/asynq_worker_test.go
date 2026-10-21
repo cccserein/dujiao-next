@@ -46,6 +46,48 @@ func TestBuildOrderFulfillmentEmailPayloadNilOrder(t *testing.T) {
 	}
 }
 
+func TestDelayedEmailDoesNotRevealRevokedDelivery(t *testing.T) {
+	for _, status := range []string{"refunded", "canceled", "pending_payment", "unknown"} {
+		t.Run(status, func(t *testing.T) {
+			order := &orderdomain.Order{Status: status,
+				Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-REVOKED-CARD"},
+				Items:       []orderdomain.OrderItem{{InstructionsJSON: jsonmap.JSON{"en-US": "PRIVATE-INSTRUCTIONS"}}},
+				Children: []orderdomain.Order{{Status: "completed", OrderNo: "FAKE-CHILD",
+					Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-CHILD-CARD"}}},
+			}
+			if got := buildOrderFulfillmentEmailPayload(order); got != "" {
+				t.Error("revoked parent still produces delivery text for queued email")
+			}
+			if got := buildOrderInstructionsEmailText(order, "en-US"); got != "" {
+				t.Error("revoked parent still produces private instructions")
+			}
+		})
+	}
+	order := &orderdomain.Order{Status: "partially_refunded", Children: []orderdomain.Order{
+		{Status: "refunded", OrderNo: "REVOKED", Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-REVOKED-CARD"}},
+		{Status: "completed", OrderNo: "VALID", Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "FAKE-VALID-CARD"}},
+	}}
+	if got := buildOrderFulfillmentEmailPayload(order); got != "[VALID]\nFAKE-VALID-CARD" {
+		t.Error("partially refunded email must include only entitled children")
+	}
+}
+
+func TestStaleDeliveryEmailStopsBeforeResolvingRecipient(t *testing.T) {
+	for _, status := range []string{"refunded", "canceled", "pending_payment"} {
+		task, err := queue.NewOrderStatusEmailTask(queue.OrderStatusEmailPayload{OrderID: 5, Status: "completed"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumer := &Consumer{Container: &container.Container{}, orderReader: orderStatusEmailWorkerOrderRepoStub{
+			order: &orderdomain.Order{ID: 5, UserID: 7, Status: status},
+		}}
+		// No user store or SMTP dependency: stale delivery must be dropped first.
+		if err := consumer.handleOrderStatusEmail(context.Background(), task); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestBuildOrderInstructionsEmailText(t *testing.T) {
 	t.Run("nil order returns empty", func(t *testing.T) {
 		if got := buildOrderInstructionsEmailText(nil, "zh-CN"); got != "" {
@@ -55,6 +97,7 @@ func TestBuildOrderInstructionsEmailText(t *testing.T) {
 
 	t.Run("locale preferred over fallback", func(t *testing.T) {
 		order := &orderdomain.Order{
+			Status: "completed",
 			Items: []orderdomain.OrderItem{
 				{InstructionsJSON: jsonmap.JSON{
 					"zh-CN": "<p>中文说明</p>",
@@ -69,6 +112,7 @@ func TestBuildOrderInstructionsEmailText(t *testing.T) {
 
 	t.Run("falls back to zh-CN when locale missing", func(t *testing.T) {
 		order := &orderdomain.Order{
+			Status: "completed",
 			Items: []orderdomain.OrderItem{
 				{InstructionsJSON: jsonmap.JSON{"zh-CN": "fallback"}},
 			},
@@ -80,6 +124,7 @@ func TestBuildOrderInstructionsEmailText(t *testing.T) {
 
 	t.Run("dedupes identical items and joins distinct", func(t *testing.T) {
 		order := &orderdomain.Order{
+			Status: "completed",
 			Items: []orderdomain.OrderItem{
 				{InstructionsJSON: jsonmap.JSON{"zh-CN": "<p>A</p>"}},
 				{InstructionsJSON: jsonmap.JSON{"zh-CN": "<p>A</p>"}}, // 重复，应去重
@@ -94,9 +139,10 @@ func TestBuildOrderInstructionsEmailText(t *testing.T) {
 
 	t.Run("collects from children items", func(t *testing.T) {
 		order := &orderdomain.Order{
+			Status: "completed",
 			Children: []orderdomain.Order{
-				{Items: []orderdomain.OrderItem{{InstructionsJSON: jsonmap.JSON{"zh-CN": "child1"}}}},
-				{Items: []orderdomain.OrderItem{{InstructionsJSON: jsonmap.JSON{"zh-CN": "child2"}}}},
+				{Status: "completed", Items: []orderdomain.OrderItem{{InstructionsJSON: jsonmap.JSON{"zh-CN": "child1"}}}},
+				{Status: "completed", Items: []orderdomain.OrderItem{{InstructionsJSON: jsonmap.JSON{"zh-CN": "child2"}}}},
 			},
 		}
 		got := buildOrderInstructionsEmailText(order, "zh-CN")
@@ -107,7 +153,8 @@ func TestBuildOrderInstructionsEmailText(t *testing.T) {
 
 	t.Run("empty instructions yield empty result", func(t *testing.T) {
 		order := &orderdomain.Order{
-			Items: []orderdomain.OrderItem{{InstructionsJSON: nil}},
+			Status: "completed",
+			Items:  []orderdomain.OrderItem{{InstructionsJSON: nil}},
 		}
 		if got := buildOrderInstructionsEmailText(order, "zh-CN"); got != "" {
 			t.Fatalf("expected empty, got %q", got)
@@ -116,6 +163,7 @@ func TestBuildOrderInstructionsEmailText(t *testing.T) {
 
 	t.Run("strips HTML from instructions", func(t *testing.T) {
 		order := &orderdomain.Order{
+			Status: "completed",
 			Items: []orderdomain.OrderItem{
 				{InstructionsJSON: jsonmap.JSON{"zh-CN": "<p>步骤一</p><ul><li>登录</li><li>激活</li></ul>"}},
 			},
@@ -130,6 +178,7 @@ func TestBuildOrderInstructionsEmailText(t *testing.T) {
 
 func TestBuildOrderFulfillmentEmailPayloadPreferOrderFulfillment(t *testing.T) {
 	order := &orderdomain.Order{
+		Status:      "completed",
 		Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "  MAIN-LINE-1\nMAIN-LINE-2  "},
 		Children: []orderdomain.Order{
 			{
@@ -221,6 +270,7 @@ func TestHandleOrderStatusEmailSkipsNonRetryableEmailErrors(t *testing.T) {
 		{
 			name: "smtp_disabled",
 			order: &orderdomain.Order{
+				Status:      "paid",
 				ID:          1,
 				OrderNo:     "DJ-ORDER-001",
 				GuestEmail:  "buyer@example.com",
@@ -233,6 +283,7 @@ func TestHandleOrderStatusEmailSkipsNonRetryableEmailErrors(t *testing.T) {
 		{
 			name: "smtp_not_configured",
 			order: &orderdomain.Order{
+				Status:      "paid",
 				ID:          2,
 				OrderNo:     "DJ-ORDER-002",
 				GuestEmail:  "buyer@example.com",
@@ -245,6 +296,7 @@ func TestHandleOrderStatusEmailSkipsNonRetryableEmailErrors(t *testing.T) {
 		{
 			name: "invalid_receiver_email",
 			order: &orderdomain.Order{
+				Status:      "paid",
 				ID:          3,
 				OrderNo:     "DJ-ORDER-003",
 				GuestEmail:  "invalid-email",
@@ -262,6 +314,7 @@ func TestHandleOrderStatusEmailSkipsNonRetryableEmailErrors(t *testing.T) {
 		{
 			name: "generic_send_failure_keeps_retryable_error",
 			order: &orderdomain.Order{
+				Status:      "paid",
 				ID:          4,
 				OrderNo:     "DJ-ORDER-004",
 				GuestEmail:  "buyer@example.com",
@@ -348,20 +401,25 @@ func TestHandleOrderStatusEmailSkipsCanceledRegisteredOrderWhenPayloadStatusEmpt
 
 func TestBuildOrderFulfillmentEmailPayloadFromChildren(t *testing.T) {
 	order := &orderdomain.Order{
+		Status: "completed",
 		Children: []orderdomain.Order{
 			{
+				Status:      "completed",
 				OrderNo:     "DJ-CHILD-01",
 				Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "  SECRET-01  "},
 			},
 			{
+				Status:      "completed",
 				OrderNo:     "DJ-CHILD-02",
 				Fulfillment: nil,
 			},
 			{
+				Status:      "completed",
 				OrderNo:     "DJ-CHILD-03",
 				Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "    "},
 			},
 			{
+				Status:      "completed",
 				OrderNo:     "DJ-CHILD-04",
 				Fulfillment: &fulfillmentdomain.Fulfillment{Payload: "SECRET-04-L1\nSECRET-04-L2"},
 			},
